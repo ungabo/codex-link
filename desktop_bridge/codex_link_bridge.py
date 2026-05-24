@@ -32,6 +32,8 @@ ACTIVE_TURN_STALE_SECONDS = 4 * 60 * 60
 ACTIVITY_TAIL_BYTES = 512 * 1024
 UPLOAD_ROOT = PROJECT_ROOT / "desktop_bridge" / "uploaded_images"
 CHECKPOINTS_PATH = PROJECT_ROOT / "desktop_bridge" / "checkpoints.json"
+PROJECT_MAPPINGS_PATH = PROJECT_ROOT / "desktop_bridge" / "project_mappings.json"
+CODEX_TRANSCRIPT_ROOT = Path.home() / "Documents" / "Codex"
 MAX_DIFF_CHARS = 80_000
 MAX_PROJECT_FILE_BYTES = 120 * 1024 * 1024
 MAX_TEXT_PREVIEW_BYTES = 1024 * 1024
@@ -133,6 +135,129 @@ def truncate_text(value: str, limit: int = MAX_DIFF_CHARS) -> tuple[str, bool]:
     if len(value) <= limit:
         return value, False
     return value[:limit].rstrip() + "\n\n... truncated ...", True
+
+
+def load_project_mappings() -> dict[str, Any]:
+    if not PROJECT_MAPPINGS_PATH.exists():
+        return {}
+    try:
+        data = json.loads(PROJECT_MAPPINGS_PATH.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def mapping_dict(data: dict[str, Any], key: str) -> dict[str, Any]:
+    value = data.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def mapped_project_root(thread_id: str, cwd: str) -> tuple[str, str]:
+    mappings = load_project_mappings()
+    clean_cwd = clean_windows_path(cwd)
+
+    threads = mapping_dict(mappings, "threads")
+    mapped = str(threads.get(thread_id) or "").strip()
+    if mapped:
+        return clean_windows_path(mapped), "thread-map"
+
+    cwd_mappings = mapping_dict(mappings, "cwd")
+    for source, target in cwd_mappings.items():
+        if path_key(clean_windows_path(str(source))) == path_key(clean_cwd):
+            return clean_windows_path(str(target)), "cwd-map"
+
+    prefix_mappings = mapping_dict(mappings, "cwdPrefixes")
+    for source, target in prefix_mappings.items():
+        source_path = clean_windows_path(str(source))
+        if source_path and is_under(clean_cwd, source_path):
+            return clean_windows_path(str(target)), "cwd-prefix-map"
+
+    return "", ""
+
+
+def mapped_project_roots() -> list[str]:
+    mappings = load_project_mappings()
+    roots: list[str] = []
+    for values in (mapping_dict(mappings, "threads"), mapping_dict(mappings, "cwd"), mapping_dict(mappings, "cwdPrefixes")):
+        for value in values.values():
+            root = clean_windows_path(str(value or ""))
+            if root and Path(root).exists():
+                roots.append(root)
+    unique: list[str] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = path_key(root)
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(root)
+    return unique
+
+
+def is_codex_transcript_cwd(cwd: str) -> bool:
+    clean_cwd = clean_windows_path(cwd)
+    return bool(clean_cwd) and is_under(clean_cwd, str(CODEX_TRANSCRIPT_ROOT))
+
+
+def validate_explicit_project_root(project_root: str) -> str:
+    clean_root = clean_windows_path(project_root)
+    if not clean_root:
+        raise ValueError("missing mapped project root")
+    path = Path(clean_root)
+    if not path.exists() or not path.is_dir():
+        raise ValueError(f"mapped project root does not exist: {clean_root}")
+    return clean_windows_path(str(path.resolve()))
+
+
+def project_root_info(codex_home: Path, thread_id: str, cwd: str, *, strict: bool = False) -> dict[str, Any]:
+    clean_cwd = clean_windows_path(cwd)
+    mapped_root, source = mapped_project_root(thread_id, clean_cwd)
+    if mapped_root:
+        try:
+            resolved = validate_explicit_project_root(mapped_root)
+        except ValueError as error:
+            if strict:
+                raise
+            return {
+                "cwd": "",
+                "originalCwd": clean_cwd,
+                "projectRootSource": source,
+                "projectRootError": str(error),
+            }
+        return {
+            "cwd": resolved,
+            "originalCwd": clean_cwd,
+            "projectRootSource": source,
+            "projectRootError": "",
+        }
+
+    if is_codex_transcript_cwd(clean_cwd):
+        if strict:
+            raise ValueError(
+                "This chat points at a Codex transcript workspace, not a real project folder. "
+                "Add a mapping in desktop_bridge/project_mappings.json before sending from Android."
+            )
+        return {
+            "cwd": "",
+            "originalCwd": clean_cwd,
+            "projectRootSource": "transcript-cwd-blocked",
+            "projectRootError": "Codex transcript workspace needs a real project mapping.",
+        }
+
+    if strict:
+        resolved = validate_cwd(codex_home, clean_cwd)
+    else:
+        resolved = clean_windows_path(str(Path(clean_cwd).resolve())) if clean_cwd and Path(clean_cwd).exists() else clean_cwd
+    return {
+        "cwd": resolved,
+        "originalCwd": clean_cwd,
+        "projectRootSource": "thread-cwd",
+        "projectRootError": "",
+    }
+
+
+def resolve_thread_project_cwd(codex_home: Path, row: sqlite3.Row) -> str:
+    info = project_root_info(codex_home, str(row["id"]), clean_windows_path(row["cwd"]), strict=True)
+    return str(info["cwd"])
 
 
 def iso_from_ms(value: int | None) -> str | None:
@@ -302,13 +427,18 @@ def load_threads(codex_home: Path, global_state: dict[str, Any]) -> tuple[list[d
             display_title = session_names.get(row["id"]) or original_title
             rollout_path = Path(clean_windows_path(row["rollout_path"]))
             activity = thread_activity_for_path(rollout_path)
+            original_cwd = clean_windows_path(row["cwd"])
+            root_info = project_root_info(codex_home, str(row["id"]), original_cwd)
             rows.append(
                 {
                     "id": row["id"],
                     "title": display_title,
                     "displayTitle": display_title,
                     "originalTitle": original_title,
-                    "cwd": clean_windows_path(row["cwd"]),
+                    "cwd": root_info["cwd"],
+                    "originalCwd": root_info["originalCwd"],
+                    "projectRootSource": root_info["projectRootSource"],
+                    "projectRootError": root_info["projectRootError"],
                     "updatedAt": iso_from_ms(updated_ms),
                     "updatedAtMs": updated_ms,
                     "archived": bool(row["archived"]),
@@ -491,6 +621,8 @@ def read_thread(
     total_count = len(messages)
     session_name = load_session_index_names(codex_home).get(thread_id)
     title = session_name or row["title"] or "Untitled chat"
+    original_cwd = clean_windows_path(row["cwd"])
+    root_info = project_root_info(codex_home, thread_id, original_cwd)
 
     if full:
         range_start = 0
@@ -508,7 +640,10 @@ def read_thread(
             "title": title,
             "displayTitle": title,
             "originalTitle": row["title"] or "Untitled chat",
-            "cwd": clean_windows_path(row["cwd"]),
+            "cwd": root_info["cwd"],
+            "originalCwd": root_info["originalCwd"],
+            "projectRootSource": root_info["projectRootSource"],
+            "projectRootError": root_info["projectRootError"],
             "updatedAt": iso_from_ms(updated_ms),
             "updatedAtMs": updated_ms,
             "archived": bool(row["archived"]),
@@ -613,6 +748,9 @@ def build_projects(global_state: dict[str, Any], threads: list[dict[str, Any]]) 
     for root in global_state.get("electron-saved-workspace-roots") or []:
         if root not in ordered_roots:
             ordered_roots.append(root)
+    for root in mapped_project_roots():
+        if root not in ordered_roots:
+            ordered_roots.append(root)
 
     projects = []
     for root in ordered_roots:
@@ -674,8 +812,8 @@ def run_process(command: list[str], *, cwd: Path | str | None = None, timeout: i
     )
     return {
         "exitCode": completed.returncode,
-        "stdout": completed.stdout.strip(),
-        "stderr": completed.stderr.strip(),
+        "stdout": completed.stdout.rstrip("\r\n"),
+        "stderr": completed.stderr.rstrip("\r\n"),
     }
 
 
@@ -1056,6 +1194,8 @@ def approved_project_roots(codex_home: Path) -> list[str]:
         for root in global_state.get(key) or []:
             roots.append(clean_windows_path(str(root)))
 
+    roots.extend(mapped_project_roots())
+
     threads, _hidden = load_threads(codex_home, global_state)
     for thread in threads:
         cwd = clean_windows_path(str(thread.get("cwd") or ""))
@@ -1136,7 +1276,7 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
                     self.write_json({"error": "thread not found"}, status=404)
                     return
                 try:
-                    cwd = validate_cwd(self.codex_home, clean_windows_path(row["cwd"]))
+                    cwd = resolve_thread_project_cwd(self.codex_home, row)
                     rel_path = query.get("path", [""])[0]
                     root_key = query.get("root", ["thread"])[0]
                     file_path = project_download_path(cwd, rel_path, root_key)
@@ -1154,7 +1294,7 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
                     self.write_json({"error": "thread not found"}, status=404)
                     return
                 try:
-                    cwd = validate_cwd(self.codex_home, clean_windows_path(row["cwd"]))
+                    cwd = resolve_thread_project_cwd(self.codex_home, row)
                     self.write_json(project_file_list(cwd, thread_id))
                 except ValueError as error:
                     self.write_json({"ok": False, "error": str(error)}, status=400)
@@ -1173,12 +1313,14 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
                     if row is None:
                         self.write_json({"error": "thread not found"}, status=404)
                         return
-                    cwd = clean_windows_path(row["cwd"])
                     try:
+                        cwd = resolve_thread_project_cwd(self.codex_home, row)
                         if action == "project-status":
                             self.write_json(git_project_status(cwd))
                         else:
                             self.write_json(git_project_diff(cwd))
+                    except ValueError as error:
+                        self.write_json({"ok": False, "error": str(error)}, status=400)
                     except RuntimeError as error:
                         self.write_json({"ok": False, "error": str(error)}, status=500)
                     return
@@ -1233,6 +1375,11 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
             try:
                 payload = self.read_json_body()
                 requested_cwd = str(payload.get("cwd") or "").strip() or default_cwd(self.codex_home)
+                if is_codex_transcript_cwd(requested_cwd):
+                    raise ValueError(
+                        "Refusing to start a phone chat in a Codex transcript workspace. "
+                        "Open a mapped chat or choose a real project root."
+                    )
                 cwd = validate_cwd(self.codex_home, requested_cwd)
             except ValueError as error:
                 self.write_json({"error": str(error)}, status=400)
@@ -1279,7 +1426,6 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
                         self.write_json({"error": str(error)}, status=400)
                         return
 
-                    cwd = clean_windows_path(row["cwd"])
                     if action == "interrupt":
                         rollout_path = Path(clean_windows_path(row["rollout_path"]))
                         activity = thread_activity_for_path(rollout_path, tail_only=False)
@@ -1296,14 +1442,21 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
                     if action == "checkpoint":
                         label = str(payload.get("label") or "phone")
                         try:
+                            cwd = resolve_thread_project_cwd(self.codex_home, row)
                             self.write_json(git_checkpoint(cwd, thread_id, label))
+                        except ValueError as error:
+                            self.write_json({"ok": False, "error": str(error)}, status=400)
                         except RuntimeError as error:
                             self.write_json({"ok": False, "error": str(error)}, status=500)
                         return
 
                     if action == "revert":
                         try:
+                            cwd = resolve_thread_project_cwd(self.codex_home, row)
                             result = git_revert_last(cwd, thread_id)
+                        except ValueError as error:
+                            self.write_json({"ok": False, "error": str(error)}, status=400)
+                            return
                         except RuntimeError as error:
                             self.write_json({"ok": False, "error": str(error)}, status=500)
                             return
@@ -1339,7 +1492,7 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
                 self.write_json({"error": "thread not found"}, status=404)
                 return
             try:
-                turn_cwd = validate_cwd(self.codex_home, clean_windows_path(row["cwd"]))
+                turn_cwd = resolve_thread_project_cwd(self.codex_home, row)
             except ValueError as error:
                 self.write_json(
                     {

@@ -71,6 +71,9 @@ public class MainActivity extends Activity {
     private static final String PREF_LOCAL_TOKEN = "local_token";
     private static final String PREF_WEB_ENDPOINT = "web_endpoint";
     private static final String PREF_WEB_TOKEN = "web_token";
+    private static final String PREF_CATALOG_CACHE = "catalog_cache";
+    private static final String PREF_CATALOG_CACHE_AT = "catalog_cache_at";
+    private static final String PREF_CATALOG_CACHE_ENDPOINT = "catalog_cache_endpoint";
     private static final String MODE_LOCAL = "local";
     private static final String MODE_WEB = "web";
     private static final String DEFAULT_WEB_ENDPOINT = "https://www.sitesindevelopment.com/codex-link/index.php/link";
@@ -493,7 +496,7 @@ public class MainActivity extends Activity {
         hostRow.setOrientation(LinearLayout.HORIZONTAL);
         hostRow.setGravity(Gravity.CENTER);
 
-        loadCatalogButton = button("Load Chats", COLOR_GOLD, COLOR_INK);
+        loadCatalogButton = button("Refresh Chats", COLOR_GOLD, COLOR_INK);
         loadCatalogButton.setOnClickListener(view -> loadCatalog());
         hostRow.addView(loadCatalogButton, weightedButton());
 
@@ -741,6 +744,7 @@ public class MainActivity extends Activity {
         connectionModeSpinner.setSelection(MODE_WEB.equals(currentConnectionMode) ? 1 : 0);
         applyingConnectionMode = false;
         applyConnectionFieldsForMode(currentConnectionMode);
+        loadCachedCatalog();
         updateHistoryView();
     }
 
@@ -862,13 +866,8 @@ public class MainActivity extends Activity {
                 mainHandler.post(() -> {
                     loadCatalogButton.setEnabled(true);
                     resetThreadView();
-                    JSONArray chats = catalog.optJSONArray("chats");
-                    loadedCatalogChats = chats == null ? new JSONArray() : chats;
-                    loadedCatalogChatCount = loadedCatalogChats.length();
-                    hasLoadedCatalog = true;
-                    renderFilteredChatRows(chatFilterInput == null ? "" : chatFilterInput.getText().toString());
-                    catalogView.setText("");
-                    catalogView.setVisibility(View.GONE);
+                    cacheCatalog(endpoint, catalog);
+                    applyCatalog(catalog);
                 });
             } catch (Exception error) {
                 Log.e(TAG, "Catalog load failed", error);
@@ -878,6 +877,54 @@ public class MainActivity extends Activity {
                 });
             }
         });
+    }
+
+    private void loadCachedCatalog() {
+        String raw = preferences.getString(PREF_CATALOG_CACHE, "");
+        if (raw == null || raw.isEmpty()) {
+            return;
+        }
+        try {
+            JSONObject catalog = new JSONObject(raw);
+            applyCatalog(catalog);
+        } catch (Exception error) {
+            preferences.edit()
+                    .remove(PREF_CATALOG_CACHE)
+                    .remove(PREF_CATALOG_CACHE_AT)
+                    .remove(PREF_CATALOG_CACHE_ENDPOINT)
+                    .apply();
+        }
+    }
+
+    private void cacheCatalog(String endpoint, JSONObject catalog) {
+        preferences.edit()
+                .putString(PREF_CATALOG_CACHE, catalog.toString())
+                .putLong(PREF_CATALOG_CACHE_AT, System.currentTimeMillis())
+                .putString(PREF_CATALOG_CACHE_ENDPOINT, endpoint)
+                .apply();
+    }
+
+    private void applyCatalog(JSONObject catalog) {
+        JSONArray chats = catalog.optJSONArray("chats");
+        loadedCatalogChats = chats == null ? new JSONArray() : chats;
+        loadedCatalogChatCount = loadedCatalogChats.length();
+        hasLoadedCatalog = true;
+        renderFilteredChatRows(chatFilterInput == null ? "" : chatFilterInput.getText().toString());
+        catalogView.setText("");
+        catalogView.setVisibility(View.GONE);
+    }
+
+    private void showCachedChatList() {
+        resetThreadView();
+        if (!hasLoadedCatalog) {
+            loadCachedCatalog();
+        } else {
+            renderFilteredChatRows(chatFilterInput == null ? "" : chatFilterInput.getText().toString());
+        }
+        if (!hasLoadedCatalog) {
+            setCatalogStatus("No cached chats yet. Tap Refresh Chats.", false);
+        }
+        rootScrollView.post(() -> rootScrollView.smoothScrollTo(0, 0));
     }
 
     private String catalogEndpointFor(String endpoint) throws IOException {
@@ -1643,17 +1690,24 @@ public class MainActivity extends Activity {
         LinearLayout row = compactToolbarRow();
         row.setPadding(0, 0, 0, 0);
 
+        Button chatsButton = toolbarButton("Chats", Color.WHITE, COLOR_PRIMARY);
+        chatsButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
+        chatsButton.setOnClickListener(view -> showCachedChatList());
+        row.addView(chatsButton, new LinearLayout.LayoutParams(0, dp(32), 0.95f));
+
+        row.addView(spacer(dp(3)));
+
         Button refreshButton = toolbarButton("Refresh", Color.WHITE, currentThreadId == null || currentThreadId.isEmpty() ? COLOR_MUTED : COLOR_PRIMARY);
         refreshButton.setEnabled(currentThreadId != null && !currentThreadId.isEmpty());
         refreshButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
         refreshButton.setOnClickListener(view -> refreshCurrentThread());
-        row.addView(refreshButton, new LinearLayout.LayoutParams(0, dp(32), 1.15f));
+        row.addView(refreshButton, new LinearLayout.LayoutParams(0, dp(32), 1.1f));
 
         row.addView(spacer(dp(3)));
 
         Button bottomButton = toolbarButton("End", COLOR_GOLD, COLOR_INK);
         bottomButton.setOnClickListener(view -> scrollToThreadBottom());
-        row.addView(bottomButton, new LinearLayout.LayoutParams(0, dp(32), 0.85f));
+        row.addView(bottomButton, new LinearLayout.LayoutParams(0, dp(32), 0.75f));
 
         row.addView(spacer(dp(3)));
 
@@ -1670,16 +1724,6 @@ public class MainActivity extends Activity {
 
     private LinearLayout buildThreadNavigationRow() {
         LinearLayout row = compactToolbarRow();
-
-        Button listButton = toolbarButton("Chats", Color.WHITE, COLOR_PRIMARY);
-        listButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
-        listButton.setOnClickListener(view -> {
-            loadCatalog();
-            rootScrollView.post(() -> rootScrollView.smoothScrollTo(0, 0));
-        });
-        row.addView(listButton, weightedToolbarButton());
-
-        row.addView(spacer(dp(3)));
 
         Button olderButton = toolbarButton("Older", Color.WHITE, hasMoreThreadMessages ? COLOR_PRIMARY : COLOR_MUTED);
         olderButton.setEnabled(hasMoreThreadMessages);

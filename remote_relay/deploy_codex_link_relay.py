@@ -16,6 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RELAY_DIR = PROJECT_ROOT / "remote_relay"
 BRIDGE_DIR = PROJECT_ROOT / "desktop_bridge"
 CONFIG_PATH = BRIDGE_DIR / "remote_tunnel_config.json"
+APK_PATH = PROJECT_ROOT / "codex-link-debug.apk"
 DEFAULT_PUBLIC_BASE_URL = "https://www.sitesindevelopment.com/codex-link"
 DEFAULT_PHONE_ENDPOINT = DEFAULT_PUBLIC_BASE_URL + "/index.php/link"
 
@@ -144,6 +145,8 @@ def main() -> int:
             upload_file(sftp, RELAY_DIR / "worker.php", posixpath.join(remote_base, "worker.php"))
             upload_file(sftp, RELAY_DIR / ".htaccess", posixpath.join(remote_base, ".htaccess"))
             upload_file(sftp, RELAY_DIR / "data" / ".htaccess", posixpath.join(remote_data, ".htaccess"))
+            if APK_PATH.exists():
+                upload_file(sftp, APK_PATH, posixpath.join(remote_base, "codex-link-debug.apk"))
             with tempfile.TemporaryDirectory() as tmp:
                 config_php = write_generated_config(Path(tmp), config)
                 upload_file(sftp, config_php, posixpath.join(remote_base, "config.php"))
@@ -155,6 +158,8 @@ def main() -> int:
     print("Uploaded codex-link relay.")
     print(f"Public base URL: {config['publicBaseUrl']}")
     print(f"Phone endpoint: {config['phoneEndpoint']}")
+    if APK_PATH.exists():
+        print(f"APK URL: {config['publicBaseUrl']}/codex-link-debug.apk")
     if config.get("testPhoneTokenExpiresAt"):
         print(f"Temporary phone token expires at: {config['testPhoneTokenExpiresAt']}")
     print(f"Local tunnel config: {CONFIG_PATH}")
