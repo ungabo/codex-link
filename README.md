@@ -36,12 +36,13 @@ The native Android prototype is now useful as a private phone companion MVP:
 - lets queued phone messages be edited or deleted before they run
 - polls an active opened chat and refreshes new transcript output at the bottom
 - attaches phone images to chat submissions
-- sends follow-up prompts from the phone through `codex app-server` with workspace-write access limited to the resumed chat cwd
+- sends follow-up prompts from the phone through `codex app-server` with workspace-write access limited to the mapped project root
 - persists queued phone messages per chat across app restarts
 - can start a new Codex chat in the currently opened chat's project folder
 - exposes phone controls for Git status, diff preview, checkpoint, and revert to last checkpoint
 - exposes a project file picker for recently changed/generated files, including direct APK downloads and in-app text previews
 - attempts to interrupt an active turn when the app-server exposes the active turn id
+- opens directly into a denser chat list, keeps connection settings collapsed, and preserves the composer/keyboard during active-chat polling
 
 ## APK Download
 
@@ -106,7 +107,7 @@ It serves:
 
 `POST /threads/:threadId/turns` refuses to start a new turn while the desktop chat is still processing. The phone queues those turns locally and submits them in order when the opened chat becomes idle.
 
-Phone-originated Codex turns currently use `approvalPolicy: never`, network disabled, and a `workspaceWrite` sandbox limited to the resumed thread's cwd. Before a phone-originated turn, the bridge records a best-effort Git checkpoint for Git-backed projects. Approval UI is still future hardening work.
+Phone-originated Codex turns currently use `approvalPolicy: never`, network disabled, and a `workspaceWrite` sandbox limited to the explicit mapped project root when one exists. The bridge blocks Codex transcript/workspace folders such as `C:\Users\Gabe\Documents\Codex\...` as writable roots unless they are mapped to a real project. Before a phone-originated turn, the bridge records a best-effort Git checkpoint for Git-backed projects. Approval UI is still future hardening work.
 
 ## Phase 0 Validation
 

@@ -18,6 +18,7 @@ import android.os.Looper;
 import android.provider.OpenableColumns;
 import android.text.Editable;
 import android.text.InputType;
+import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.util.Base64;
 import android.util.Log;
@@ -26,6 +27,7 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewParent;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -110,7 +112,13 @@ public class MainActivity extends Activity {
     private TextView threadTurnStatusView;
     private TextView threadResponseText;
     private TextView attachmentStatusView;
+    private TextView connectionSummaryView;
+    private TextView appTitleView;
+    private TextView catalogTitleView;
     private LinearLayout catalogSectionLayout;
+    private LinearLayout catalogHostRowLayout;
+    private LinearLayout connectionSectionLayout;
+    private LinearLayout connectionDetailsLayout;
     private LinearLayout sendSectionLayout;
     private LinearLayout historySectionLayout;
     private LinearLayout threadComposerLayout;
@@ -131,6 +139,8 @@ public class MainActivity extends Activity {
     private Button threadSendButton;
     private Button loadCatalogButton;
     private Button attachImageButton;
+    private Button connectionToggleButton;
+    private Button hostStatusButton;
     private String currentThreadId;
     private String currentThreadTitle;
     private String currentThreadCwd = "";
@@ -157,6 +167,7 @@ public class MainActivity extends Activity {
     private boolean threadActionsExpanded = false;
     private boolean currentThreadFullLoaded = false;
     private boolean applyingConnectionMode = false;
+    private boolean connectionExpanded = false;
     private int loadedCatalogChatCount = 0;
     private JSONArray loadedCatalogChats = new JSONArray();
     private JSONArray loadedThreadMessages = new JSONArray();
@@ -270,7 +281,7 @@ public class MainActivity extends Activity {
 
         threadControlsLayout = new LinearLayout(this);
         threadControlsLayout.setOrientation(LinearLayout.VERTICAL);
-        threadControlsLayout.setPadding(dp(10), dp(6), dp(10), dp(6));
+        threadControlsLayout.setPadding(dp(10), dp(30), dp(10), dp(6));
         threadControlsLayout.setBackground(outlineDrawable(COLOR_PANEL, COLOR_BORDER, 0));
         threadControlsLayout.setElevation(dp(4));
         threadControlsLayout.setVisibility(View.GONE);
@@ -297,7 +308,7 @@ public class MainActivity extends Activity {
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(22), dp(24), dp(22), dp(28));
+        root.setPadding(dp(16), dp(34), dp(16), dp(22));
         rootScrollView.addView(root, new ScrollView.LayoutParams(
                 ScrollView.LayoutParams.MATCH_PARENT,
                 ScrollView.LayoutParams.WRAP_CONTENT));
@@ -309,27 +320,18 @@ public class MainActivity extends Activity {
         threadComposerLayout = buildThreadComposer();
         threadComposerLayout.setVisibility(View.GONE);
 
-        TextView eyebrow = text("MOBILE COMPANION", 12, COLOR_PRIMARY, Typeface.BOLD);
-        eyebrow.setLetterSpacing(0.08f);
-        root.addView(eyebrow);
+        appTitleView = text("Codex Link", 23, COLOR_INK, Typeface.BOLD);
+        appTitleView.setPadding(0, 0, 0, dp(10));
+        root.addView(appTitleView);
 
-        TextView title = text("Codex Link", 32, COLOR_INK, Typeface.BOLD);
-        title.setPadding(0, dp(4), 0, 0);
-        root.addView(title);
-
-        TextView subtitle = text("Send browser links, selected text, and notes from Android to a desktop Codex endpoint.", 15, COLOR_MUTED, Typeface.NORMAL);
-        subtitle.setLineSpacing(dp(2), 1.0f);
-        subtitle.setPadding(0, dp(4), 0, dp(18));
-        root.addView(subtitle);
-
-        root.addView(buildSettingsSection());
-        root.addView(spacer(dp(14)));
         root.addView(buildCatalogSection());
-        sendSectionSpacer = spacer(dp(14));
+        root.addView(spacer(dp(10)));
+        root.addView(buildSettingsSection());
+        sendSectionSpacer = spacer(dp(10));
         root.addView(sendSectionSpacer);
         sendSectionLayout = buildSendSection();
         root.addView(sendSectionLayout);
-        historySectionSpacer = spacer(dp(14));
+        historySectionSpacer = spacer(dp(10));
         root.addView(historySectionSpacer);
         historySectionLayout = buildHistorySection();
         root.addView(historySectionLayout);
@@ -347,7 +349,35 @@ public class MainActivity extends Activity {
 
     private LinearLayout buildSettingsSection() {
         LinearLayout section = section();
-        section.addView(sectionTitle("Connection"));
+        connectionSectionLayout = section;
+
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+
+        LinearLayout labels = new LinearLayout(this);
+        labels.setOrientation(LinearLayout.VERTICAL);
+
+        TextView title = text("Connection", 16, COLOR_INK, Typeface.BOLD);
+        labels.addView(title);
+
+        connectionSummaryView = text("", 12, COLOR_MUTED, Typeface.NORMAL);
+        connectionSummaryView.setSingleLine(true);
+        connectionSummaryView.setPadding(0, dp(2), 0, 0);
+        labels.addView(connectionSummaryView);
+
+        header.addView(labels, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        connectionToggleButton = toolbarButton("Edit", Color.WHITE, COLOR_PRIMARY);
+        connectionToggleButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
+        connectionToggleButton.setOnClickListener(view -> setConnectionExpanded(!connectionExpanded));
+        header.addView(connectionToggleButton, new LinearLayout.LayoutParams(dp(74), dp(34)));
+
+        section.addView(header, matchWrap());
+
+        connectionDetailsLayout = new LinearLayout(this);
+        connectionDetailsLayout.setOrientation(LinearLayout.VERTICAL);
+        connectionDetailsLayout.setPadding(0, dp(12), 0, 0);
 
         connectionModeSpinner = new Spinner(this);
         ArrayAdapter<String> connectionAdapter = new ArrayAdapter<>(
@@ -366,31 +396,36 @@ public class MainActivity extends Activity {
                 currentConnectionMode = position == 1 ? MODE_WEB : MODE_LOCAL;
                 preferences.edit().putString(PREF_CONNECTION_MODE, currentConnectionMode).apply();
                 applyConnectionFieldsForMode(currentConnectionMode);
+                updateConnectionSummary();
             }
 
             @Override
             public void onNothingSelected(AdapterView<?> parent) {
             }
         });
-        section.addView(connectionModeSpinner, matchWrap());
+        connectionDetailsLayout.addView(connectionModeSpinner, matchWrap());
 
-        section.addView(spacer(dp(10)));
+        connectionDetailsLayout.addView(spacer(dp(10)));
 
         endpointInput = input("http://192.168.1.20:8765/link", false);
         endpointInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        section.addView(endpointInput);
+        connectionDetailsLayout.addView(endpointInput);
 
-        section.addView(spacer(dp(10)));
+        connectionDetailsLayout.addView(spacer(dp(10)));
 
         tokenInput = input("Pairing token (optional)", false);
         tokenInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        section.addView(tokenInput);
+        connectionDetailsLayout.addView(tokenInput);
 
-        section.addView(spacer(dp(12)));
+        connectionDetailsLayout.addView(spacer(dp(12)));
 
         Button saveButton = button("Save", COLOR_PRIMARY, Color.WHITE);
         saveButton.setOnClickListener(view -> saveSettings());
-        section.addView(saveButton, matchWrap());
+        connectionDetailsLayout.addView(saveButton, matchWrap());
+
+        section.addView(connectionDetailsLayout, matchWrap());
+        setConnectionExpanded(false);
+        updateConnectionSummary();
 
         return section;
     }
@@ -415,12 +450,15 @@ public class MainActivity extends Activity {
         threadPromptInput = input("Message Codex in this chat", true);
         threadPromptInput.setMinLines(1);
         threadPromptInput.setMaxLines(4);
+        threadPromptInput.setTextSize(14);
         threadPromptInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         row.addView(threadPromptInput, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
         row.addView(spacer(dp(6)));
 
-        threadSendButton = button("Send", COLOR_ACCENT, Color.WHITE);
+        threadSendButton = toolbarButton("Send", COLOR_ACCENT, Color.WHITE);
+        threadSendButton.setTextSize(13);
+        threadSendButton.setSingleLine(true);
         threadSendButton.setOnClickListener(view -> sendThreadPrompt());
         row.addView(threadSendButton, new LinearLayout.LayoutParams(dp(76), dp(46)));
 
@@ -490,22 +528,26 @@ public class MainActivity extends Activity {
     private LinearLayout buildCatalogSection() {
         LinearLayout section = section();
         catalogSectionLayout = section;
-        section.addView(sectionTitle("Codex Desktop"));
+        catalogTitleView = sectionTitle("Chats");
+        section.addView(catalogTitleView);
 
         LinearLayout hostRow = new LinearLayout(this);
+        catalogHostRowLayout = hostRow;
         hostRow.setOrientation(LinearLayout.HORIZONTAL);
         hostRow.setGravity(Gravity.CENTER);
 
-        loadCatalogButton = button("Refresh Chats", COLOR_GOLD, COLOR_INK);
+        loadCatalogButton = toolbarButton("Refresh", COLOR_GOLD, COLOR_INK);
+        loadCatalogButton.setTextSize(13);
         loadCatalogButton.setOnClickListener(view -> loadCatalog());
-        hostRow.addView(loadCatalogButton, weightedButton());
+        hostRow.addView(loadCatalogButton, new LinearLayout.LayoutParams(0, dp(40), 1f));
 
         hostRow.addView(spacer(dp(10)));
 
-        Button hostStatusButton = button("Host", Color.WHITE, COLOR_PRIMARY);
+        hostStatusButton = toolbarButton("Host", Color.WHITE, COLOR_PRIMARY);
+        hostStatusButton.setTextSize(13);
         hostStatusButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
         hostStatusButton.setOnClickListener(view -> checkHostStatus());
-        hostRow.addView(hostStatusButton, weightedButton());
+        hostRow.addView(hostStatusButton, new LinearLayout.LayoutParams(0, dp(40), 1f));
 
         section.addView(hostRow, matchWrap());
 
@@ -765,6 +807,8 @@ public class MainActivity extends Activity {
         }
         editor.apply();
         setStatus("Saved " + connectionModeLabel() + " settings.", false);
+        updateConnectionSummary();
+        setConnectionExpanded(false);
     }
 
     private void saveConnectionFieldsForMode(String mode) {
@@ -813,10 +857,39 @@ public class MainActivity extends Activity {
         } else {
             setStatus("Using " + connectionModeLabel() + ".", false);
         }
+        updateConnectionSummary();
     }
 
     private String connectionModeLabel() {
         return MODE_WEB.equals(currentConnectionMode) ? "Web Link" : "Local Windows";
+    }
+
+    private void setConnectionExpanded(boolean expanded) {
+        connectionExpanded = expanded;
+        if (connectionDetailsLayout != null) {
+            connectionDetailsLayout.setVisibility(expanded ? View.VISIBLE : View.GONE);
+        }
+        if (connectionToggleButton != null) {
+            connectionToggleButton.setText(expanded ? "Done" : "Edit");
+        }
+    }
+
+    private void updateConnectionSummary() {
+        if (connectionSummaryView == null) {
+            return;
+        }
+        String endpoint = endpointInput == null ? "" : endpointInput.getText().toString().trim();
+        String host = "";
+        try {
+            if (!endpoint.isEmpty()) {
+                URL url = new URL(endpoint);
+                host = url.getHost();
+            }
+        } catch (Exception ignored) {
+            host = "";
+        }
+        String label = connectionModeLabel();
+        connectionSummaryView.setText(host.isEmpty() ? label : label + " - " + host);
     }
 
     private void pasteFromClipboard() {
@@ -922,7 +995,7 @@ public class MainActivity extends Activity {
             renderFilteredChatRows(chatFilterInput == null ? "" : chatFilterInput.getText().toString());
         }
         if (!hasLoadedCatalog) {
-            setCatalogStatus("No cached chats yet. Tap Refresh Chats.", false);
+            setCatalogStatus("No cached chats yet. Tap Refresh.", false);
         }
         rootScrollView.post(() -> rootScrollView.smoothScrollTo(0, 0));
     }
@@ -1198,16 +1271,51 @@ public class MainActivity extends Activity {
         String projectLabel = jsonString(chat, "projectLabel");
         boolean pinned = chat.optBoolean("pinned");
         boolean active = chat.optBoolean("active");
-        Button row = button(formatChatRow(title, updatedAt, projectLabel, pinned, active), Color.WHITE, active ? COLOR_PRIMARY : COLOR_INK);
-        row.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-        row.setTypeface(Typeface.DEFAULT, Typeface.NORMAL);
-        row.setSingleLine(false);
-        row.setMaxLines(4);
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setMinimumHeight(dp(64));
+        row.setPadding(dp(12), dp(9), dp(12), dp(9));
         row.setEnabled(!threadId.isEmpty());
-        row.setBackground(outlineDrawable(Color.rgb(252, 251, 248), COLOR_BORDER, dp(8)));
+        row.setClickable(!threadId.isEmpty());
+        row.setFocusable(!threadId.isEmpty());
+        row.setBackground(outlineDrawable(Color.rgb(252, 251, 248), active ? COLOR_PRIMARY : COLOR_BORDER, dp(8)));
         row.setOnClickListener(view -> loadThread(threadId, title));
+
+        TextView titleView = text(title == null || title.isEmpty() ? "Untitled chat" : title, 15, active ? COLOR_PRIMARY : COLOR_INK, Typeface.NORMAL);
+        titleView.setSingleLine(false);
+        titleView.setMaxLines(2);
+        titleView.setLineSpacing(dp(1), 1.0f);
+        row.addView(titleView, matchWrap());
+
+        String meta = compactChatMeta(updatedAt, projectLabel, pinned, active);
+        if (!meta.isEmpty()) {
+            TextView metaView = text(meta, 12, COLOR_MUTED, Typeface.NORMAL);
+            metaView.setSingleLine(true);
+            metaView.setEllipsize(TextUtils.TruncateAt.END);
+            metaView.setPadding(0, dp(4), 0, 0);
+            row.addView(metaView, matchWrap());
+        }
+
         chatListLayout.addView(row, matchWrap());
-        chatListLayout.addView(spacer(dp(8)));
+        chatListLayout.addView(spacer(dp(6)));
+    }
+
+    private String compactChatMeta(String updatedAt, String projectLabel, boolean pinned, boolean active) {
+        ArrayList<String> parts = new ArrayList<>();
+        if (active) {
+            parts.add("Running");
+        }
+        if (pinned) {
+            parts.add("Pinned");
+        }
+        if (projectLabel != null && !projectLabel.isEmpty()) {
+            parts.add(projectLabel);
+        }
+        if (updatedAt != null && !updatedAt.isEmpty()) {
+            parts.add(updatedAt);
+        }
+        return String.join(" - ", parts);
     }
 
     private String chatDisplayTitle(JSONObject chat) {
@@ -1390,6 +1498,9 @@ public class MainActivity extends Activity {
         int previousHeight = messageListLayout.getHeight();
         int previousScrollY = rootScrollView.getScrollY();
         int previousRangeEnd = loadedRangeEnd;
+        boolean promptFocused = threadPromptInput != null && threadPromptInput.hasFocus();
+        int promptSelection = promptFocused ? Math.max(0, threadPromptInput.getSelectionStart()) : 0;
+        boolean wasNearBottom = isNearThreadBottom();
 
         if (thread != null) {
             currentThreadId = thread.optString("id");
@@ -1409,7 +1520,7 @@ public class MainActivity extends Activity {
         chatListLayout.removeAllViews();
         setCatalogThreadMode(true);
         renderThreadControls(full);
-        catalogView.setVisibility(View.VISIBLE);
+        catalogView.setVisibility(View.GONE);
         catalogView.setText(threadHeaderText(full));
         loadedThreadMessages = prepend
                 ? prependMessages(messages, loadedThreadMessages)
@@ -1417,7 +1528,7 @@ public class MainActivity extends Activity {
 
         renderThreadMessages(endpoint);
         if (currentThreadActive) {
-            setThreadTurnStatus("Codex is still processing this chat. New messages will queue and send in order.", false);
+            setThreadTurnStatus("Codex is running. New messages queue.", false);
         } else if (!isSendingThreadTurn) {
             fastPollRemaining = 0;
             setThreadTurnStatus("", false);
@@ -1433,8 +1544,13 @@ public class MainActivity extends Activity {
             if (prepend) {
                 int addedHeight = messageListLayout.getHeight() - previousHeight;
                 rootScrollView.scrollTo(0, Math.max(0, previousScrollY + addedHeight));
+            } else if (promptFocused) {
+                rootScrollView.scrollTo(0, Math.max(0, previousScrollY));
+                restoreThreadPromptFocus(promptSelection);
             } else {
-                scrollThreadToBottom(false);
+                if (wasNearBottom) {
+                    scrollThreadToBottom(false);
+                }
                 if (!currentThreadActive) {
                     maybeRunQueuedTurn();
                 }
@@ -1654,7 +1770,10 @@ public class MainActivity extends Activity {
 
     private String fixedThreadSummaryText(boolean full) {
         String title = currentThreadTitle == null || currentThreadTitle.isEmpty() ? "Untitled chat" : currentThreadTitle;
-        return title + "\n" + threadScopeText(full);
+        String scope = full
+                ? "Full chat"
+                : Math.max(1, loadedRangeStart + 1) + "-" + loadedRangeEnd + " of " + totalThreadMessages;
+        return title + " - " + scope;
     }
 
     private void renderThreadControls(boolean full) {
@@ -1662,7 +1781,8 @@ public class MainActivity extends Activity {
         threadControlsLayout.setVisibility(View.VISIBLE);
 
         TextView summaryView = text(fixedThreadSummaryText(full), 12, COLOR_INK, Typeface.BOLD);
-        summaryView.setMaxLines(2);
+        summaryView.setSingleLine(true);
+        summaryView.setEllipsize(TextUtils.TruncateAt.END);
         summaryView.setLineSpacing(dp(1), 1.0f);
         summaryView.setPadding(0, 0, 0, dp(4));
         threadControlsLayout.addView(summaryView, matchWrap());
@@ -2247,7 +2367,7 @@ public class MainActivity extends Activity {
     }
 
     private void scrollToThreadTop() {
-        rootScrollView.post(() -> rootScrollView.smoothScrollTo(0, Math.max(0, scrollYFor(catalogView))));
+        rootScrollView.post(() -> rootScrollView.smoothScrollTo(0, Math.max(0, scrollYFor(messageListLayout))));
     }
 
     private void scrollToThreadBottom() {
@@ -2263,6 +2383,28 @@ public class MainActivity extends Activity {
                 rootScrollView.scrollTo(0, Math.max(0, target));
             }
         });
+    }
+
+    private boolean isNearThreadBottom() {
+        if (rootScrollView == null || messageListLayout == null || messageListLayout.getHeight() == 0) {
+            return true;
+        }
+        int bottom = scrollYFor(messageListLayout) + messageListLayout.getHeight();
+        int viewportBottom = rootScrollView.getScrollY() + rootScrollView.getHeight();
+        return viewportBottom >= bottom - dp(120);
+    }
+
+    private void restoreThreadPromptFocus(int selection) {
+        if (threadPromptInput == null) {
+            return;
+        }
+        threadPromptInput.requestFocus();
+        int safeSelection = Math.min(Math.max(0, selection), threadPromptInput.length());
+        threadPromptInput.setSelection(safeSelection);
+        InputMethodManager inputMethodManager = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (inputMethodManager != null) {
+            inputMethodManager.showSoftInput(threadPromptInput, InputMethodManager.SHOW_IMPLICIT);
+        }
     }
 
     private int scrollYFor(View target) {
@@ -2420,8 +2562,20 @@ public class MainActivity extends Activity {
         }
 
         int supportingVisibility = enabled ? View.GONE : View.VISIBLE;
+        if (appTitleView != null) {
+            appTitleView.setVisibility(supportingVisibility);
+        }
+        if (catalogTitleView != null) {
+            catalogTitleView.setVisibility(supportingVisibility);
+        }
+        if (catalogHostRowLayout != null) {
+            catalogHostRowLayout.setVisibility(supportingVisibility);
+        }
         if (loadCatalogButton != null) {
             loadCatalogButton.setVisibility(supportingVisibility);
+        }
+        if (hostStatusButton != null) {
+            hostStatusButton.setVisibility(supportingVisibility);
         }
         if (catalogStatusView != null) {
             catalogStatusView.setVisibility(supportingVisibility);
@@ -2440,6 +2594,9 @@ public class MainActivity extends Activity {
         }
         if (chatSortSpacer != null) {
             chatSortSpacer.setVisibility(supportingVisibility);
+        }
+        if (connectionSectionLayout != null) {
+            connectionSectionLayout.setVisibility(supportingVisibility);
         }
         if (sendSectionSpacer != null) {
             sendSectionSpacer.setVisibility(supportingVisibility);
@@ -2911,6 +3068,8 @@ public class MainActivity extends Activity {
 
             TextView summary = text(queueSummary(turn), 12, COLOR_INK, Typeface.NORMAL);
             summary.setLineSpacing(dp(2), 1.0f);
+            summary.setMaxLines(2);
+            summary.setEllipsize(TextUtils.TruncateAt.END);
             item.addView(summary, matchWrap());
 
             LinearLayout row = new LinearLayout(this);
