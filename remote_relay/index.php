@@ -23,6 +23,26 @@ function relay_token(): string {
     return '';
 }
 
+function relay_phone_auth_error(string $token): string {
+    $hasPermanentToken = PHONE_TOKEN !== '';
+    $hasTestToken = defined('TEST_PHONE_TOKEN') && TEST_PHONE_TOKEN !== '';
+
+    if (!$hasPermanentToken && !$hasTestToken) {
+        return '';
+    }
+    if ($hasPermanentToken && hash_equals(PHONE_TOKEN, $token)) {
+        return '';
+    }
+    if ($hasTestToken && hash_equals(TEST_PHONE_TOKEN, $token)) {
+        $expiresAt = defined('TEST_PHONE_TOKEN_EXPIRES_AT') ? strtotime(TEST_PHONE_TOKEN_EXPIRES_AT) : false;
+        if ($expiresAt !== false && time() <= $expiresAt) {
+            return '';
+        }
+        return 'test token expired';
+    }
+    return 'unauthorized';
+}
+
 function relay_route(): string {
     $uri = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
     if ($uri === false || $uri === null || $uri === '') {
@@ -114,8 +134,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit;
 }
 
-if (PHONE_TOKEN !== '' && !hash_equals(PHONE_TOKEN, relay_token())) {
-    relay_json(['ok' => false, 'error' => 'unauthorized'], 401);
+$authError = relay_phone_auth_error(relay_token());
+if ($authError !== '') {
+    relay_json(['ok' => false, 'error' => $authError], 401);
 }
 
 $jobId = relay_job_id();
@@ -136,4 +157,3 @@ if (file_put_contents($jobPath, json_encode($job, JSON_UNESCAPED_SLASHES), LOCK_
 }
 
 relay_wait_for_result($jobId);
-

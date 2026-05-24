@@ -50,7 +50,9 @@ A debug APK is committed for quick side-load testing:
 artifacts/codex-link-debug.apk
 ```
 
-The APK intentionally does not embed private relay tokens. For Web Link mode, use the phone endpoint shown above and enter the private `phoneToken` from:
+Public test APKs may include a short-lived Web Link test token for convenience. The relay enforces test-token expiry server-side, and these tokens should be rotated after testing.
+
+For durable private Web Link access, use the phone endpoint shown above and enter the private `phoneToken` from:
 
 ```text
 desktop_bridge\remote_tunnel_config.json

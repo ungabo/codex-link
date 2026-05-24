@@ -3,6 +3,8 @@
   "phoneEndpoint": "https://www.sitesindevelopment.com/codex-link/index.php/link",
   "relayWorkerUrl": "https://www.sitesindevelopment.com/codex-link/worker.php",
   "phoneToken": "replace-with-a-private-phone-token",
+  "testPhoneToken": "replace-with-a-short-lived-test-token",
+  "testPhoneTokenExpiresAt": "2026-05-25T00:00:00Z",
   "workerToken": "replace-with-a-private-worker-token",
   "localBaseUrl": "http://127.0.0.1:18765",
   "localToken": "",

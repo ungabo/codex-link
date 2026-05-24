@@ -46,6 +46,14 @@ D:\__MY APPS\codex link for android\desktop_bridge\remote_tunnel_config.sample.j
 
 Use the `phoneToken` value as the Android pairing token when `Web Link` mode is selected. Do not paste these tokens into public files or chat logs.
 
+For public APK testing, the relay can also accept a short-lived `testPhoneToken`. The deploy script can generate and upload one with:
+
+```powershell
+python remote_relay\deploy_codex_link_relay.py --new-test-phone-token --test-token-hours 24
+```
+
+The server checks `testPhoneTokenExpiresAt` before accepting the token.
+
 ## Verification
 
 With the tunnel running, this should return bridge health through the public relay:

@@ -74,6 +74,7 @@ public class MainActivity extends Activity {
     private static final String MODE_LOCAL = "local";
     private static final String MODE_WEB = "web";
     private static final String DEFAULT_WEB_ENDPOINT = "https://www.sitesindevelopment.com/codex-link/index.php/link";
+    private static final String DEFAULT_WEB_TOKEN = BuildConfig.CODEX_LINK_DEFAULT_WEB_TOKEN;
 
     private static final int COLOR_BACKGROUND = Color.rgb(246, 244, 239);
     private static final int COLOR_INK = Color.rgb(35, 39, 38);
@@ -773,7 +774,13 @@ public class MainActivity extends Activity {
         String token;
         if (MODE_WEB.equals(mode)) {
             endpoint = preferences.getString(PREF_WEB_ENDPOINT, DEFAULT_WEB_ENDPOINT);
-            token = preferences.getString(PREF_WEB_TOKEN, "");
+            token = preferences.getString(PREF_WEB_TOKEN, DEFAULT_WEB_TOKEN);
+            if (endpoint == null || endpoint.isEmpty()) {
+                endpoint = DEFAULT_WEB_ENDPOINT;
+            }
+            if (token == null || token.isEmpty()) {
+                token = DEFAULT_WEB_TOKEN;
+            }
         } else {
             endpoint = preferences.getString(PREF_LOCAL_ENDPOINT, preferences.getString(PREF_ENDPOINT, ""));
             token = preferences.getString(PREF_LOCAL_TOKEN, preferences.getString(PREF_TOKEN, ""));

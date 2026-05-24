@@ -2,16 +2,27 @@ plugins {
     id "com.android.application"
 }
 
+def localProperties = new Properties()
+def localPropertiesFile = rootProject.file("local.properties")
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withInputStream { stream -> localProperties.load(stream) }
+}
+
 android {
     namespace = "com.codexlink.android"
     compileSdk = 36
+
+    buildFeatures {
+        buildConfig = true
+    }
 
     defaultConfig {
         applicationId = "com.codexlink.android"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
+        buildConfigField "String", "CODEX_LINK_DEFAULT_WEB_TOKEN", "\"${(localProperties.getProperty("codexLinkDefaultWebToken", "")).replace("\\", "\\\\").replace("\"", "\\\"")}\""
     }
 
     compileOptions {

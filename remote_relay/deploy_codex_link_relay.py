@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+from datetime import datetime, timedelta, timezone
 import json
 import posixpath
 import secrets
@@ -31,7 +33,7 @@ def parse_info(path: Path) -> dict[str, str]:
     return values
 
 
-def load_or_create_tunnel_config() -> dict[str, object]:
+def load_or_create_tunnel_config(test_token_hours: int | None) -> dict[str, object]:
     BRIDGE_DIR.mkdir(parents=True, exist_ok=True)
     if CONFIG_PATH.exists():
         config = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
@@ -47,6 +49,10 @@ def load_or_create_tunnel_config() -> dict[str, object]:
     config.setdefault("localToken", "")
     config.setdefault("pollSeconds", 1.0)
     config.setdefault("localTimeoutSeconds", 310)
+    if test_token_hours is not None:
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=test_token_hours)
+        config["testPhoneToken"] = secrets.token_urlsafe(32)
+        config["testPhoneTokenExpiresAt"] = expires_at.replace(microsecond=0).isoformat().replace("+00:00", "Z")
     CONFIG_PATH.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     return config
 
@@ -58,11 +64,15 @@ def php_string(value: str) -> str:
 def write_generated_config(tmp_dir: Path, config: dict[str, object]) -> Path:
     phone_token = str(config["phoneToken"])
     worker_token = str(config["workerToken"])
+    test_phone_token = str(config.get("testPhoneToken", ""))
+    test_phone_token_expires_at = str(config.get("testPhoneTokenExpiresAt", ""))
     config_php = tmp_dir / "config.php"
     config_php.write_text(
         "<?php\n"
         "declare(strict_types=1);\n"
         "const PHONE_TOKEN = " + php_string(phone_token) + ";\n"
+        "const TEST_PHONE_TOKEN = " + php_string(test_phone_token) + ";\n"
+        "const TEST_PHONE_TOKEN_EXPIRES_AT = " + php_string(test_phone_token_expires_at) + ";\n"
         "const WORKER_TOKEN = " + php_string(worker_token) + ";\n"
         "const PHONE_WAIT_SECONDS = 240;\n",
         encoding="utf-8",
@@ -86,6 +96,20 @@ def upload_file(sftp: paramiko.SFTPClient, local: Path, remote: str) -> None:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Upload the Codex Link PHP relay over SFTP.")
+    parser.add_argument(
+        "--new-test-phone-token",
+        action="store_true",
+        help="Generate a temporary phone token for APK testing.",
+    )
+    parser.add_argument(
+        "--test-token-hours",
+        type=int,
+        default=24,
+        help="Lifetime for --new-test-phone-token, in hours.",
+    )
+    args = parser.parse_args()
+
     info_path = Path.home() / "Desktop" / "sitesindevelopment-sftp-info.txt"
     if not info_path.exists():
         print(f"Missing SFTP info file: {info_path}", file=sys.stderr)
@@ -101,7 +125,8 @@ def main() -> int:
         print("SFTP info file is missing host, username, password, or remote folder.", file=sys.stderr)
         return 1
 
-    config = load_or_create_tunnel_config()
+    test_token_hours = args.test_token_hours if args.new_test_phone_token else None
+    config = load_or_create_tunnel_config(test_token_hours)
     remote_base = posixpath.join(remote_root, "codex-link")
     remote_data = posixpath.join(remote_base, "data")
 
@@ -130,8 +155,10 @@ def main() -> int:
     print("Uploaded codex-link relay.")
     print(f"Public base URL: {config['publicBaseUrl']}")
     print(f"Phone endpoint: {config['phoneEndpoint']}")
+    if config.get("testPhoneTokenExpiresAt"):
+        print(f"Temporary phone token expires at: {config['testPhoneTokenExpiresAt']}")
     print(f"Local tunnel config: {CONFIG_PATH}")
-    print("Phone and worker tokens were written to the local tunnel config file; they were not printed.")
+    print("Phone, test, and worker tokens were written to the local tunnel config file; they were not printed.")
     return 0
 
 
