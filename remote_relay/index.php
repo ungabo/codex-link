@@ -20,7 +20,11 @@ function relay_token(): string {
     if (stripos($header, 'Bearer ') === 0) {
         return trim(substr($header, 7));
     }
-    return '';
+    return (string)($_GET['token'] ?? '');
+}
+
+function relay_safe_header_value(string $value): string {
+    return str_replace(["\r", "\n"], '', $value);
 }
 
 function relay_phone_auth_error(string $token): string {
@@ -105,6 +109,14 @@ function relay_wait_for_result(string $jobId): void {
             http_response_code($status);
             header('Content-Type: ' . $contentType);
             header('Cache-Control: no-store');
+            $headers = $result['headers'] ?? [];
+            if (is_array($headers)) {
+                $contentDisposition = (string)($headers['Content-Disposition'] ?? $headers['content-disposition'] ?? '');
+                if ($contentDisposition !== '') {
+                    header('Content-Disposition: ' . relay_safe_header_value($contentDisposition));
+                }
+            }
+            header('Content-Length: ' . strlen($body));
             echo $body;
             exit;
         }

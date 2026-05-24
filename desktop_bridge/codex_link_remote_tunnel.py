@@ -82,6 +82,16 @@ def local_url_for(config: dict[str, Any], job: dict[str, Any]) -> str:
     return base + route
 
 
+def forwarded_headers(headers: dict[str, str]) -> dict[str, str]:
+    allowed = {}
+    for key in ("Content-Disposition", "content-disposition"):
+        value = headers.get(key)
+        if value:
+            allowed["Content-Disposition"] = value
+            break
+    return allowed
+
+
 def handle_job(config: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     job_id = str(job.get("id") or "")
     local_timeout = float(config.get("localTimeoutSeconds") or 310)
@@ -106,6 +116,7 @@ def handle_job(config: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
             "id": job_id,
             "status": status,
             "contentType": response_headers.get("Content-Type", "application/json; charset=utf-8"),
+            "headers": forwarded_headers(response_headers),
             "bodyBase64": base64.b64encode(response_body).decode("ascii"),
         }
     except (OSError, URLError, TimeoutError) as error:

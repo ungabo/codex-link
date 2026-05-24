@@ -40,6 +40,7 @@ The native Android prototype is now useful as a private phone companion MVP:
 - persists queued phone messages per chat across app restarts
 - can start a new Codex chat in the currently opened chat's project folder
 - exposes phone controls for Git status, diff preview, checkpoint, and revert to last checkpoint
+- exposes a project file picker for recently changed/generated files, including direct APK downloads and in-app text previews
 - attempts to interrupt an active turn when the app-server exposes the active turn id
 
 ## APK Download
@@ -95,6 +96,8 @@ It serves:
 - `GET /threads/:threadId?full=1`
 - `GET /threads/:threadId/project-status`
 - `GET /threads/:threadId/diff`
+- `GET /threads/:threadId/files`
+- `GET /threads/:threadId/files/download?path=<project-relative-path>`
 - `POST /threads`
 - `POST /threads/:threadId/turns`
 - `POST /threads/:threadId/interrupt`

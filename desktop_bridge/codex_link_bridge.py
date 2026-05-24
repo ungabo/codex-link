@@ -33,6 +33,73 @@ ACTIVITY_TAIL_BYTES = 512 * 1024
 UPLOAD_ROOT = PROJECT_ROOT / "desktop_bridge" / "uploaded_images"
 CHECKPOINTS_PATH = PROJECT_ROOT / "desktop_bridge" / "checkpoints.json"
 MAX_DIFF_CHARS = 80_000
+MAX_PROJECT_FILE_BYTES = 120 * 1024 * 1024
+MAX_TEXT_PREVIEW_BYTES = 1024 * 1024
+MAX_PROJECT_FILE_RESULTS = 120
+PROJECT_FILE_EXTENSIONS = {
+    ".aab",
+    ".apk",
+    ".css",
+    ".csv",
+    ".gradle",
+    ".htm",
+    ".html",
+    ".java",
+    ".js",
+    ".json",
+    ".jsx",
+    ".kt",
+    ".log",
+    ".md",
+    ".pdf",
+    ".properties",
+    ".py",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+    ".zip",
+}
+TEXT_FILE_EXTENSIONS = {
+    ".css",
+    ".csv",
+    ".gradle",
+    ".htm",
+    ".html",
+    ".java",
+    ".js",
+    ".json",
+    ".jsx",
+    ".kt",
+    ".log",
+    ".md",
+    ".properties",
+    ".py",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+PROJECT_FILE_EXCLUDED_DIRS = {
+    ".git",
+    ".gradle",
+    ".idea",
+    ".next",
+    ".vscode",
+    "__pycache__",
+    "node_modules",
+}
+PROJECT_FILE_EXCLUDED_PATH_PARTS = {
+    "intermediates",
+    "logs",
+    "tmp",
+}
 IMAGE_REF_RE = re.compile(
     r"!\[[^\]]*\]\(<?([^>)]+?)(?:>|\))|"
     r"\[[^\]]+\]\(<([^>]+\.(?:png|jpe?g|webp|gif))>\)|"
@@ -41,6 +108,8 @@ IMAGE_REF_RE = re.compile(
 )
 IMAGE_PLACEHOLDER_RE = re.compile(r"<image\s+name=\[?([^\]\n>]+)\]?>", re.IGNORECASE)
 TURN_LOCK = threading.Lock()
+
+mimetypes.add_type("application/vnd.android.package-archive", ".apk")
 
 
 def clean_windows_path(value: str | None) -> str:
@@ -690,6 +759,183 @@ def git_project_diff(cwd: str) -> dict[str, Any]:
     }
 
 
+def should_skip_project_file_dir(dirname: str) -> bool:
+    return dirname in PROJECT_FILE_EXCLUDED_DIRS or dirname.startswith(".pytest_cache")
+
+
+def project_file_kind(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".apk":
+        return "android-apk"
+    if suffix == ".aab":
+        return "android-bundle"
+    if suffix in {".zip"}:
+        return "archive"
+    if suffix in {".md", ".txt", ".log"}:
+        return "document"
+    if suffix in TEXT_FILE_EXTENSIONS:
+        return "text"
+    return "file"
+
+
+def project_file_record(
+    root: Path,
+    path: Path,
+    thread_id: str,
+    reason: str,
+    root_key: str,
+    root_label: str,
+) -> dict[str, Any] | None:
+    try:
+        resolved = path.resolve()
+        stat = resolved.stat()
+        rel = resolved.relative_to(root).as_posix()
+    except (OSError, ValueError):
+        return None
+
+    if any(part in PROJECT_FILE_EXCLUDED_PATH_PARTS for part in rel.split("/")):
+        return None
+    if resolved.name.lower().endswith((".out.txt", ".err.txt")):
+        return None
+    if not resolved.is_file() or stat.st_size > MAX_PROJECT_FILE_BYTES:
+        return None
+
+    suffix = resolved.suffix.lower()
+    viewable = suffix in TEXT_FILE_EXTENSIONS and stat.st_size <= MAX_TEXT_PREVIEW_BYTES
+    query = f"path={quote(rel, safe='')}"
+    if root_key != "thread":
+        query = f"root={quote(root_key, safe='')}&" + query
+    return {
+        "name": resolved.name,
+        "path": rel,
+        "rootKey": root_key,
+        "rootLabel": root_label,
+        "extension": suffix,
+        "kind": project_file_kind(resolved),
+        "reason": reason,
+        "sizeBytes": stat.st_size,
+        "modifiedAtMs": int(stat.st_mtime * 1000),
+        "modifiedAt": iso_from_seconds(stat.st_mtime),
+        "viewable": viewable,
+        "downloadUrl": f"/threads/{quote(thread_id, safe='')}/files/download?{query}",
+    }
+
+
+def add_project_file_candidate(
+    candidates: dict[str, tuple[Path, str]],
+    root: Path,
+    path: Path,
+    reason: str,
+) -> None:
+    try:
+        resolved = path.resolve()
+        rel = resolved.relative_to(root).as_posix()
+    except (OSError, ValueError):
+        return
+    if resolved.is_file():
+        candidates.setdefault(rel, (resolved, reason))
+
+
+def project_file_root(cwd: str) -> Path:
+    clean_cwd = clean_windows_path(cwd)
+    status = git_project_status(clean_cwd)
+    if status.get("isGitRepo") and status.get("root"):
+        return Path(clean_windows_path(str(status["root"]))).resolve()
+    return Path(clean_cwd).resolve()
+
+
+def project_file_roots(cwd: str) -> list[tuple[str, str, Path]]:
+    roots: list[tuple[str, str, Path]] = [("thread", "Current chat project", project_file_root(cwd))]
+    project_root = PROJECT_ROOT.resolve()
+    if project_root.exists() and not any(path_key(str(root)) == path_key(str(project_root)) for _key, _label, root in roots):
+        roots.append(("codex-link", "Codex Link app", project_root))
+    return roots
+
+
+def collect_project_files(root: Path, thread_id: str, root_key: str, root_label: str) -> list[dict[str, Any]]:
+    candidates: dict[str, tuple[Path, str]] = {}
+
+    status = git_project_status(str(root))
+    for item in status.get("changedFiles") or []:
+        if not isinstance(item, dict):
+            continue
+        raw_path = str(item.get("path") or "").strip()
+        if not raw_path:
+            continue
+        if " -> " in raw_path:
+            raw_path = raw_path.split(" -> ", 1)[1]
+        add_project_file_candidate(candidates, root, root / raw_path, "changed")
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if not should_skip_project_file_dir(name)]
+        folder = Path(dirpath)
+        for filename in filenames:
+            path = folder / filename
+            if path.suffix.lower() not in PROJECT_FILE_EXTENSIONS:
+                continue
+            add_project_file_candidate(candidates, root, path, "project")
+
+    records = []
+    for path, reason in candidates.values():
+        record = project_file_record(root, path, thread_id, reason, root_key, root_label)
+        if record is not None:
+            records.append(record)
+
+    return records
+
+
+def project_file_sort_key(item: dict[str, Any]) -> tuple[int, int]:
+    extension = str(item.get("extension") or "").lower()
+    if extension == ".apk":
+        priority = 0
+    elif extension in {".aab", ".zip"}:
+        priority = 1
+    elif extension in {".md", ".txt", ".log"}:
+        priority = 2
+    else:
+        priority = 3
+    return (priority, -int(item.get("modifiedAtMs") or 0))
+
+
+def project_file_list(cwd: str, thread_id: str) -> dict[str, Any]:
+    roots = project_file_roots(cwd)
+    records = []
+    for root_key, root_label, root in roots:
+        records.extend(collect_project_files(root, thread_id, root_key, root_label))
+
+    records.sort(key=project_file_sort_key)
+    return {
+        "ok": True,
+        "cwd": clean_windows_path(cwd),
+        "roots": [
+            {"key": root_key, "label": root_label, "path": clean_windows_path(str(root))}
+            for root_key, root_label, root in roots
+        ],
+        "files": records[:MAX_PROJECT_FILE_RESULTS],
+        "truncated": len(records) > MAX_PROJECT_FILE_RESULTS,
+        "maxFileBytes": MAX_PROJECT_FILE_BYTES,
+    }
+
+
+def project_download_path(cwd: str, rel_path: str, root_key: str = "thread") -> Path:
+    if root_key == "codex-link":
+        root = PROJECT_ROOT.resolve()
+    elif root_key in {"", "thread"}:
+        root = project_file_root(cwd)
+    else:
+        raise ValueError("unknown project file root")
+    if not rel_path:
+        raise ValueError("missing file path")
+    target = (root / rel_path).resolve()
+    if not is_under(str(target), str(root)):
+        raise ValueError("file path is outside the project")
+    if not target.exists() or not target.is_file():
+        raise ValueError("file not found")
+    if target.stat().st_size > MAX_PROJECT_FILE_BYTES:
+        raise ValueError("file is too large to download through Codex Link")
+    return target
+
+
 def load_checkpoints() -> dict[str, Any]:
     if not CHECKPOINTS_PATH.exists():
         return {"entries": []}
@@ -882,6 +1128,40 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
         matching_prefix = next((prefix for prefix in thread_prefixes if path.startswith(prefix)), None)
         if matching_prefix is not None:
             thread_tail = unquote(path[len(matching_prefix) :])
+            files_download_marker = "/files/download"
+            if thread_tail.endswith(files_download_marker):
+                thread_id = thread_tail[: -len(files_download_marker)]
+                row = load_thread_row(self.codex_home, thread_id)
+                if row is None:
+                    self.write_json({"error": "thread not found"}, status=404)
+                    return
+                try:
+                    cwd = validate_cwd(self.codex_home, clean_windows_path(row["cwd"]))
+                    rel_path = query.get("path", [""])[0]
+                    root_key = query.get("root", ["thread"])[0]
+                    file_path = project_download_path(cwd, rel_path, root_key)
+                except ValueError as error:
+                    self.write_json({"ok": False, "error": str(error)}, status=400)
+                    return
+                self.write_file(file_path, attachment=True)
+                return
+
+            files_marker = "/files"
+            if thread_tail.endswith(files_marker):
+                thread_id = thread_tail[: -len(files_marker)]
+                row = load_thread_row(self.codex_home, thread_id)
+                if row is None:
+                    self.write_json({"error": "thread not found"}, status=404)
+                    return
+                try:
+                    cwd = validate_cwd(self.codex_home, clean_windows_path(row["cwd"]))
+                    self.write_json(project_file_list(cwd, thread_id))
+                except ValueError as error:
+                    self.write_json({"ok": False, "error": str(error)}, status=400)
+                except RuntimeError as error:
+                    self.write_json({"ok": False, "error": str(error)}, status=500)
+                return
+
             action_markers = {
                 "/project-status": "project-status",
                 "/diff": "diff",
@@ -1150,7 +1430,10 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
     def authorized(self) -> bool:
         if not self.token:
             return True
-        return self.headers.get("Authorization") == f"Bearer {self.token}"
+        if self.headers.get("Authorization") == f"Bearer {self.token}":
+            return True
+        query_token = parse_qs(urlparse(self.path).query).get("token", [""])[0]
+        return query_token == self.token
 
     def write_json(self, value: dict[str, Any], status: int = 200) -> None:
         body = json.dumps(value, ensure_ascii=False).encode("utf-8")
@@ -1161,13 +1444,19 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def write_file(self, path: Path) -> None:
+    def write_file(self, path: Path, *, attachment: bool = False) -> None:
         content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
         body = path.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if attachment:
+            fallback_name = re.sub(r'[^A-Za-z0-9._ -]+', "_", path.name).strip() or "download"
+            self.send_header(
+                "Content-Disposition",
+                f'attachment; filename="{fallback_name}"; filename*=UTF-8\'\'{quote(path.name)}',
+            )
         self.end_headers()
         self.wfile.write(body)
 

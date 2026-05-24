@@ -1693,6 +1693,14 @@ public class MainActivity extends Activity {
 
         row.addView(spacer(dp(3)));
 
+        Button filesButton = toolbarButton("Files", Color.WHITE, currentThreadCwd.isEmpty() ? COLOR_MUTED : COLOR_PRIMARY);
+        filesButton.setEnabled(!currentThreadCwd.isEmpty());
+        filesButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
+        filesButton.setOnClickListener(view -> loadProjectFiles());
+        row.addView(filesButton, weightedToolbarButton());
+
+        row.addView(spacer(dp(3)));
+
         Button revertButton = toolbarButton("Revert", Color.WHITE, currentThreadCwd.isEmpty() ? COLOR_MUTED : COLOR_ACCENT);
         revertButton.setEnabled(!currentThreadCwd.isEmpty());
         revertButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
@@ -1863,6 +1871,154 @@ public class MainActivity extends Activity {
                 mainHandler.post(() -> setThreadTurnStatus(error.getMessage() == null ? "Project request failed." : error.getMessage(), true));
             }
         });
+    }
+
+    private void loadProjectFiles() {
+        String endpoint = normalizedEndpoint();
+        String token = tokenInput.getText().toString().trim();
+        if (currentThreadId == null || currentThreadId.isEmpty()) {
+            setThreadTurnStatus("Open a chat first.", true);
+            return;
+        }
+
+        setThreadTurnStatus("Loading project files...", false);
+        String threadId = currentThreadId;
+        networkExecutor.execute(() -> {
+            try {
+                String body = getCatalog(threadActionEndpointFor(endpoint, threadId, "files"), token);
+                JSONObject response = new JSONObject(body);
+                mainHandler.post(() -> {
+                    showProjectFilesDialog(endpoint, response);
+                    setThreadTurnStatus("", false);
+                });
+            } catch (Exception error) {
+                mainHandler.post(() -> setThreadTurnStatus(error.getMessage() == null ? "Could not load files." : error.getMessage(), true));
+            }
+        });
+    }
+
+    private void showProjectFilesDialog(String endpoint, JSONObject response) {
+        JSONArray files = response.optJSONArray("files");
+        if (files == null || files.length() == 0) {
+            showThreadResponseOverlay("No downloadable project files were found for this chat.");
+            return;
+        }
+
+        ArrayList<JSONObject> items = new ArrayList<>();
+        ArrayList<String> labels = new ArrayList<>();
+        for (int index = 0; index < files.length(); index++) {
+            JSONObject item = files.optJSONObject(index);
+            if (item == null) {
+                continue;
+            }
+            items.add(item);
+            labels.add(formatProjectFileLabel(item));
+        }
+
+        if (items.isEmpty()) {
+            showThreadResponseOverlay("No downloadable project files were found for this chat.");
+            return;
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle("Project files")
+                .setItems(labels.toArray(new String[0]), (dialog, which) -> chooseProjectFileAction(endpoint, items.get(which)))
+                .setNegativeButton("Close", null)
+                .show();
+    }
+
+    private String formatProjectFileLabel(JSONObject file) {
+        String path = file.optString("path", file.optString("name", "file"));
+        String size = formatBytes(file.optLong("sizeBytes", 0));
+        long modifiedAtMs = file.optLong("modifiedAtMs", 0);
+        String modified = modifiedAtMs > 0 ? timeFormat.format(new Date(modifiedAtMs)) : "";
+        String kind = file.optString("kind", "file");
+        String rootLabel = file.optString("rootLabel", "");
+        StringBuilder builder = new StringBuilder();
+        if (!rootLabel.isEmpty()) {
+            builder.append(rootLabel).append(": ");
+        }
+        builder.append(path);
+        builder.append("\n").append(kind).append(" - ").append(size);
+        if (!modified.isEmpty()) {
+            builder.append(" - ").append(modified);
+        }
+        return builder.toString();
+    }
+
+    private String formatBytes(long bytes) {
+        if (bytes < 1024) {
+            return bytes + " B";
+        }
+        double value = bytes / 1024.0;
+        if (value < 1024) {
+            return String.format(Locale.US, "%.1f KB", value);
+        }
+        value = value / 1024.0;
+        if (value < 1024) {
+            return String.format(Locale.US, "%.1f MB", value);
+        }
+        return String.format(Locale.US, "%.1f GB", value / 1024.0);
+    }
+
+    private void chooseProjectFileAction(String endpoint, JSONObject file) {
+        boolean viewable = file.optBoolean("viewable", false);
+        boolean isApk = ".apk".equals(file.optString("extension", "").toLowerCase(Locale.US));
+        if (!viewable || isApk) {
+            openProjectFileDownload(endpoint, file);
+            return;
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle(file.optString("name", "Project file"))
+                .setItems(new String[]{"View in app", "Download"}, (dialog, which) -> {
+                    if (which == 0) {
+                        previewProjectFile(endpoint, file);
+                    } else {
+                        openProjectFileDownload(endpoint, file);
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void previewProjectFile(String endpoint, JSONObject file) {
+        String token = tokenInput.getText().toString().trim();
+        String downloadUrl = file.optString("downloadUrl", "");
+        if (downloadUrl.isEmpty()) {
+            setThreadTurnStatus("This file does not have a download URL.", true);
+            return;
+        }
+
+        setThreadTurnStatus("Loading file...", false);
+        networkExecutor.execute(() -> {
+            try {
+                String body = getCatalog(absoluteUrlForEndpoint(endpoint, downloadUrl), token);
+                String title = file.optString("path", file.optString("name", "Project file"));
+                mainHandler.post(() -> {
+                    showThreadResponseOverlay(title + "\n\n" + body);
+                    setThreadTurnStatus("", false);
+                });
+            } catch (Exception error) {
+                mainHandler.post(() -> setThreadTurnStatus(error.getMessage() == null ? "Could not load file." : error.getMessage(), true));
+            }
+        });
+    }
+
+    private void openProjectFileDownload(String endpoint, JSONObject file) {
+        String downloadUrl = file.optString("downloadUrl", "");
+        if (downloadUrl.isEmpty()) {
+            setThreadTurnStatus("This file does not have a download URL.", true);
+            return;
+        }
+        try {
+            String fileUrl = absoluteExternalUrlForEndpoint(endpoint, downloadUrl);
+            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(fileUrl));
+            startActivity(intent);
+            setThreadTurnStatus("Opening download...", false);
+        } catch (Exception error) {
+            setThreadTurnStatus("Could not open download.", true);
+        }
     }
 
     private void createProjectCheckpoint() {
@@ -2085,7 +2241,7 @@ public class MainActivity extends Activity {
 
     private void openMediaUrl(String endpoint, String loadUrl) {
         try {
-            String mediaUrl = absoluteUrlForEndpoint(endpoint, loadUrl);
+            String mediaUrl = absoluteExternalUrlForEndpoint(endpoint, loadUrl);
             Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(mediaUrl));
             startActivity(intent);
         } catch (Exception error) {
@@ -2094,8 +2250,25 @@ public class MainActivity extends Activity {
     }
 
     private String absoluteUrlForEndpoint(String endpoint, String relativePath) throws IOException {
+        if (relativePath == null || relativePath.isEmpty()) {
+            return endpoint;
+        }
+        if (relativePath.startsWith("http://") || relativePath.startsWith("https://")) {
+            return relativePath;
+        }
         URL url = new URL(endpoint);
-        return new URL(url.getProtocol(), url.getHost(), url.getPort(), relativePath).toString();
+        String cleanPath = relativePath.startsWith("/") ? relativePath.substring(1) : relativePath;
+        return new URL(url.getProtocol(), url.getHost(), url.getPort(), apiBasePathFor(url) + cleanPath).toString();
+    }
+
+    private String absoluteExternalUrlForEndpoint(String endpoint, String relativePath) throws IOException {
+        String url = absoluteUrlForEndpoint(endpoint, relativePath);
+        String token = tokenInput.getText().toString().trim();
+        if (token.isEmpty()) {
+            return url;
+        }
+        String separator = url.contains("?") ? "&" : "?";
+        return url + separator + "token=" + URLEncoder.encode(token, StandardCharsets.UTF_8.name());
     }
 
     private void resetThreadView() {
