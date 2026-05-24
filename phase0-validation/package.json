@@ -1,0 +1,23 @@
+{
+  "name": "codex-link-phase0-validation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "validate": "tsx src/validate.ts",
+    "sync-test": "tsx src/sync-test-current-thread.ts",
+    "send-turn": "tsx src/send-turn.ts",
+    "start-thread": "tsx src/start-thread.ts",
+    "interrupt-turn": "tsx src/interrupt-turn.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}

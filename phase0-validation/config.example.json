@@ -1,0 +1,8 @@
+{
+  "codexPath": "C:\\Users\\Gabe\\AppData\\Local\\OpenAI\\Codex\\bin\\3f4fb8cdd344abc7\\codex.exe",
+  "appServerUrl": "ws://127.0.0.1:4500",
+  "startServer": true,
+  "testProjectDir": "D:\\__MY APPS\\codex link for android\\phase0-validation\\sandbox",
+  "turnTimeoutMs": 180000,
+  "prompt": "Validation smoke test only. Do not edit files or run commands. Reply with exactly one short sentence confirming Codex app-server received this turn."
+}

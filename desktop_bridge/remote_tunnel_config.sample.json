@@ -1,0 +1,11 @@
+{
+  "publicBaseUrl": "https://www.sitesindevelopment.com/codex-link",
+  "phoneEndpoint": "https://www.sitesindevelopment.com/codex-link/index.php/link",
+  "relayWorkerUrl": "https://www.sitesindevelopment.com/codex-link/worker.php",
+  "phoneToken": "replace-with-a-private-phone-token",
+  "workerToken": "replace-with-a-private-worker-token",
+  "localBaseUrl": "http://127.0.0.1:18765",
+  "localToken": "",
+  "pollSeconds": 1.0,
+  "localTimeoutSeconds": 310
+}

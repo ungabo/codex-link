@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Codex Link</string>
+    <string name="share_target_label">Send to Codex Link</string>
+    <string name="process_text_label">Send selection to Codex Link</string>
+</resources>
