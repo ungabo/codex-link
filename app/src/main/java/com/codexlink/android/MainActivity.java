@@ -119,6 +119,7 @@ public class MainActivity extends Activity {
     private LinearLayout catalogHostRowLayout;
     private LinearLayout connectionSectionLayout;
     private LinearLayout connectionDetailsLayout;
+    private LinearLayout jumpOverlayLayout;
     private LinearLayout sendSectionLayout;
     private LinearLayout historySectionLayout;
     private LinearLayout threadComposerLayout;
@@ -141,6 +142,8 @@ public class MainActivity extends Activity {
     private Button attachImageButton;
     private Button connectionToggleButton;
     private Button hostStatusButton;
+    private Button jumpUpButton;
+    private Button jumpDownButton;
     private String currentThreadId;
     private String currentThreadTitle;
     private String currentThreadCwd = "";
@@ -258,7 +261,7 @@ public class MainActivity extends Activity {
 
         Uri uri = data.getData();
         if (uri == null) {
-            setThreadTurnStatus("No image selected.", true);
+            setThreadTurnStatus("No file selected.", true);
             return;
         }
 
@@ -273,10 +276,10 @@ public class MainActivity extends Activity {
         selectedImageName = displayNameForUri(uri);
         selectedImageMimeType = getContentResolver().getType(uri);
         if (selectedImageMimeType == null || selectedImageMimeType.isEmpty()) {
-            selectedImageMimeType = "image/*";
+            selectedImageMimeType = "application/octet-stream";
         }
         updateAttachmentPreview();
-        setThreadTurnStatus("Image attached.", false);
+        setThreadTurnStatus("File attached.", false);
     }
 
     private View buildContentView() {
@@ -302,7 +305,7 @@ public class MainActivity extends Activity {
         rootScrollView.setBackgroundColor(COLOR_BACKGROUND);
         rootScrollView.setVerticalScrollBarEnabled(true);
         rootScrollView.setScrollbarFadingEnabled(false);
-        rootScrollView.setScrollBarSize(dp(12));
+        rootScrollView.setScrollBarSize(dp(12) + 5);
         rootScrollView.setScrollBarStyle(View.SCROLLBARS_INSIDE_INSET);
         rootScrollView.setOnScrollChangeListener((view, scrollX, scrollY, oldScrollX, oldScrollY) -> {
             if (scrollY == 0 && oldScrollY > 0 && hasMoreThreadMessages && !isLoadingThreadPage) {
@@ -353,6 +356,14 @@ public class MainActivity extends Activity {
                 Gravity.BOTTOM);
         overlayParams.setMargins(dp(12), 0, dp(12), dp(12));
         shell.addView(threadResponseOverlay, overlayParams);
+
+        LinearLayout jumpOverlay = buildJumpOverlay();
+        FrameLayout.LayoutParams jumpParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM | Gravity.END);
+        jumpParams.setMargins(0, 0, dp(14), dp(18));
+        shell.addView(jumpOverlay, jumpParams);
 
         return shell;
     }
@@ -532,6 +543,30 @@ public class MainActivity extends Activity {
         row.addView(closeButton, new LinearLayout.LayoutParams(dp(44), dp(38)));
 
         overlay.addView(row, matchWrap());
+        return overlay;
+    }
+
+    private LinearLayout buildJumpOverlay() {
+        LinearLayout overlay = new LinearLayout(this);
+        jumpOverlayLayout = overlay;
+        overlay.setOrientation(LinearLayout.VERTICAL);
+        overlay.setGravity(Gravity.CENTER);
+        overlay.setVisibility(View.GONE);
+
+        jumpUpButton = toolbarButton("↑", Color.WHITE, COLOR_PRIMARY);
+        jumpUpButton.setTextSize(18);
+        jumpUpButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(24)));
+        jumpUpButton.setOnClickListener(view -> jumpToThreadTop());
+        overlay.addView(jumpUpButton, new LinearLayout.LayoutParams(dp(48), dp(48)));
+
+        overlay.addView(spacer(dp(8)));
+
+        jumpDownButton = toolbarButton("↓", COLOR_GOLD, COLOR_INK);
+        jumpDownButton.setTextSize(18);
+        jumpDownButton.setBackground(outlineDrawable(COLOR_GOLD, COLOR_GOLD, dp(24)));
+        jumpDownButton.setOnClickListener(view -> scrollToThreadBottom());
+        overlay.addView(jumpDownButton, new LinearLayout.LayoutParams(dp(48), dp(48)));
+
         return overlay;
     }
 
@@ -1802,7 +1837,6 @@ public class MainActivity extends Activity {
 
         threadControlsLayout.addView(buildPrimaryThreadControlRow(full), matchWrap());
         if (threadActionsExpanded) {
-            threadControlsLayout.addView(buildThreadNavigationRow(), matchWrap());
             threadControlsLayout.addView(buildThreadActionRow(), matchWrap());
             threadControlsLayout.addView(buildProjectActionRow(), matchWrap());
             threadControlsLayout.addView(buildThreadSearchRow(), matchWrap());
@@ -1831,26 +1865,31 @@ public class MainActivity extends Activity {
         row.addView(spacer(dp(3)));
 
         Button refreshButton = toolbarButton("Refresh", Color.WHITE, currentThreadId == null || currentThreadId.isEmpty() ? COLOR_MUTED : COLOR_PRIMARY);
+        refreshButton.setText("↻");
+        refreshButton.setTextSize(16);
         refreshButton.setEnabled(currentThreadId != null && !currentThreadId.isEmpty());
         refreshButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
         refreshButton.setOnClickListener(view -> refreshCurrentThread());
-        row.addView(refreshButton, new LinearLayout.LayoutParams(0, dp(32), 1.1f));
+        row.addView(refreshButton, new LinearLayout.LayoutParams(0, dp(32), 0.55f));
 
         row.addView(spacer(dp(3)));
 
-        Button bottomButton = toolbarButton("End", COLOR_GOLD, COLOR_INK);
-        bottomButton.setOnClickListener(view -> scrollToThreadBottom());
-        row.addView(bottomButton, new LinearLayout.LayoutParams(0, dp(32), 0.75f));
+        Button filesButton = toolbarButton("Files", Color.WHITE, currentThreadCwd.isEmpty() ? COLOR_MUTED : COLOR_PRIMARY);
+        filesButton.setEnabled(!currentThreadCwd.isEmpty());
+        filesButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
+        filesButton.setOnClickListener(view -> loadProjectFiles());
+        row.addView(filesButton, new LinearLayout.LayoutParams(0, dp(32), 0.8f));
 
         row.addView(spacer(dp(3)));
 
-        Button actionsButton = toolbarButton(threadActionsExpanded ? "Actions -" : "Actions +", Color.WHITE, COLOR_PRIMARY);
+        Button actionsButton = toolbarButton(threadActionsExpanded ? "×" : "⋯", Color.WHITE, COLOR_PRIMARY);
+        actionsButton.setTextSize(18);
         actionsButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
         actionsButton.setOnClickListener(view -> {
             threadActionsExpanded = !threadActionsExpanded;
             renderThreadControls(full);
         });
-        row.addView(actionsButton, new LinearLayout.LayoutParams(0, dp(32), 1.15f));
+        row.addView(actionsButton, new LinearLayout.LayoutParams(0, dp(32), 0.55f));
 
         return row;
     }
@@ -1926,14 +1965,6 @@ public class MainActivity extends Activity {
         checkpointButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
         checkpointButton.setOnClickListener(view -> createProjectCheckpoint());
         row.addView(checkpointButton, new LinearLayout.LayoutParams(0, dp(34), 1.4f));
-
-        row.addView(spacer(dp(3)));
-
-        Button filesButton = toolbarButton("Files", Color.WHITE, currentThreadCwd.isEmpty() ? COLOR_MUTED : COLOR_PRIMARY);
-        filesButton.setEnabled(!currentThreadCwd.isEmpty());
-        filesButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
-        filesButton.setOnClickListener(view -> loadProjectFiles());
-        row.addView(filesButton, weightedToolbarButton());
 
         row.addView(spacer(dp(3)));
 
@@ -2383,6 +2414,10 @@ public class MainActivity extends Activity {
         rootScrollView.post(() -> rootScrollView.smoothScrollTo(0, Math.max(0, scrollYFor(messageListLayout))));
     }
 
+    private void jumpToThreadTop() {
+        scrollToThreadTop();
+    }
+
     private void scrollToThreadBottom() {
         if (!currentThreadFullLoaded
                 && currentThreadId != null
@@ -2665,6 +2700,9 @@ public class MainActivity extends Activity {
         }
         if (threadComposerLayout != null) {
             threadComposerLayout.setVisibility(enabled ? View.VISIBLE : View.GONE);
+        }
+        if (jumpOverlayLayout != null) {
+            jumpOverlayLayout.setVisibility(enabled ? View.VISIBLE : View.GONE);
         }
     }
 
