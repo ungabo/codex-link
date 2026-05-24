@@ -186,6 +186,20 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static class HttpResult {
+        final int status;
+        final String body;
+
+        HttpResult(int status, String body) {
+            this.status = status;
+            this.body = body == null ? "" : body;
+        }
+
+        boolean isOk() {
+            return status >= 200 && status < 300;
+        }
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -939,6 +953,23 @@ public class MainActivity extends Activity {
     }
 
     private String getCatalog(String endpoint, String token) throws IOException {
+        HttpResult result = getCatalogOnce(endpoint, token);
+        if (shouldRetryWithIncludedWebToken(endpoint, token, result.status)) {
+            HttpResult retry = getCatalogOnce(endpoint, DEFAULT_WEB_TOKEN);
+            if (retry.isOk()) {
+                rememberIncludedWebToken();
+            }
+            result = retry;
+        }
+        if (result.isOk()) {
+            return result.body;
+        }
+
+        throwHttpError("Catalog endpoint", result);
+        return "";
+    }
+
+    private HttpResult getCatalogOnce(String endpoint, String token) throws IOException {
         URL url = new URL(endpoint);
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
         connection.setRequestMethod("GET");
@@ -952,16 +983,44 @@ public class MainActivity extends Activity {
         int status = connection.getResponseCode();
         String response = readResponse(connection, status);
         connection.disconnect();
+        return new HttpResult(status, response);
+    }
 
-        if (status >= 200 && status < 300) {
-            return response;
+    private boolean shouldRetryWithIncludedWebToken(String endpoint, String token, int status) {
+        if (status != 401 || !MODE_WEB.equals(currentConnectionMode) || DEFAULT_WEB_TOKEN.isEmpty() || DEFAULT_WEB_TOKEN.equals(token)) {
+            return false;
         }
-
-        if (response.isEmpty()) {
-            throw new IOException("Catalog endpoint replied with HTTP " + status + ".");
+        try {
+            URL url = new URL(endpoint);
+            String host = url.getHost() == null ? "" : url.getHost().toLowerCase(Locale.US);
+            String path = url.getPath() == null ? "" : url.getPath();
+            return host.endsWith("sitesindevelopment.com") && path.startsWith("/codex-link");
+        } catch (Exception ignored) {
+            return false;
         }
+    }
 
-        throw new IOException("HTTP " + status + ": " + response);
+    private void rememberIncludedWebToken() {
+        preferences.edit()
+                .putString(PREF_WEB_TOKEN, DEFAULT_WEB_TOKEN)
+                .putString(PREF_TOKEN, DEFAULT_WEB_TOKEN)
+                .apply();
+        mainHandler.post(() -> {
+            if (MODE_WEB.equals(currentConnectionMode) && tokenInput != null) {
+                String visibleToken = tokenInput.getText().toString().trim();
+                if (!DEFAULT_WEB_TOKEN.equals(visibleToken)) {
+                    tokenInput.setText(DEFAULT_WEB_TOKEN);
+                    setStatus("Updated Web Link test token.", false);
+                }
+            }
+        });
+    }
+
+    private void throwHttpError(String label, HttpResult result) throws IOException {
+        if (result.body.isEmpty()) {
+            throw new IOException(label + " replied with HTTP " + result.status + ".");
+        }
+        throw new IOException("HTTP " + result.status + ": " + result.body);
     }
 
     private void buildChatRows(JSONObject catalog) {
@@ -2621,6 +2680,23 @@ public class MainActivity extends Activity {
     }
 
     private String postThreadPayload(String endpoint, String token, JSONObject payload) throws IOException {
+        HttpResult result = postThreadPayloadOnce(endpoint, token, payload);
+        if (shouldRetryWithIncludedWebToken(endpoint, token, result.status)) {
+            HttpResult retry = postThreadPayloadOnce(endpoint, DEFAULT_WEB_TOKEN, payload);
+            if (retry.isOk()) {
+                rememberIncludedWebToken();
+            }
+            result = retry;
+        }
+        if (result.isOk()) {
+            return result.body;
+        }
+
+        throwHttpError("Desktop endpoint", result);
+        return "";
+    }
+
+    private HttpResult postThreadPayloadOnce(String endpoint, String token, JSONObject payload) throws IOException {
         URL url = new URL(endpoint);
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
         connection.setRequestMethod("POST");
@@ -2643,16 +2719,7 @@ public class MainActivity extends Activity {
         int status = connection.getResponseCode();
         String response = readResponse(connection, status);
         connection.disconnect();
-
-        if (status >= 200 && status < 300) {
-            return response;
-        }
-
-        if (response.isEmpty()) {
-            throw new IOException("Desktop endpoint replied with HTTP " + status + ".");
-        }
-
-        throw new IOException("HTTP " + status + ": " + response);
+        return new HttpResult(status, response);
     }
 
     private void maybeRunQueuedTurn() {
@@ -3079,6 +3146,30 @@ public class MainActivity extends Activity {
     }
 
     private String postPayload(String endpoint, String token, String content) throws IOException, JSONException {
+        JSONObject payload = new JSONObject()
+                .put("source", "android")
+                .put("kind", looksLikeUrl(content) ? "url" : "text")
+                .put("content", content)
+                .put("sentAt", System.currentTimeMillis())
+                .put("appVersion", "0.1.0");
+
+        HttpResult result = postPayloadOnce(endpoint, token, payload);
+        if (shouldRetryWithIncludedWebToken(endpoint, token, result.status)) {
+            HttpResult retry = postPayloadOnce(endpoint, DEFAULT_WEB_TOKEN, payload);
+            if (retry.isOk()) {
+                rememberIncludedWebToken();
+            }
+            result = retry;
+        }
+        if (result.isOk()) {
+            return "Delivered to desktop (" + result.status + ").";
+        }
+
+        throwHttpError("Desktop endpoint", result);
+        return "";
+    }
+
+    private HttpResult postPayloadOnce(String endpoint, String token, JSONObject payload) throws IOException {
         URL url = new URL(endpoint);
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
         connection.setRequestMethod("POST");
@@ -3091,13 +3182,6 @@ public class MainActivity extends Activity {
             connection.setRequestProperty("Authorization", "Bearer " + token);
         }
 
-        JSONObject payload = new JSONObject()
-                .put("source", "android")
-                .put("kind", looksLikeUrl(content) ? "url" : "text")
-                .put("content", content)
-                .put("sentAt", System.currentTimeMillis())
-                .put("appVersion", "0.1.0");
-
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
         connection.setFixedLengthStreamingMode(body.length);
 
@@ -3108,16 +3192,7 @@ public class MainActivity extends Activity {
         int status = connection.getResponseCode();
         String response = readResponse(connection, status);
         connection.disconnect();
-
-        if (status >= 200 && status < 300) {
-            return "Delivered to desktop (" + status + ").";
-        }
-
-        if (response.isEmpty()) {
-            throw new IOException("Desktop endpoint replied with HTTP " + status + ".");
-        }
-
-        throw new IOException("HTTP " + status + ": " + response);
+        return new HttpResult(status, response);
     }
 
     private boolean looksLikeUrl(String content) {
