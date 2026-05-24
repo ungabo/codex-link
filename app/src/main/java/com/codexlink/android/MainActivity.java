@@ -200,6 +200,16 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static class ScrollAnchor {
+        final int messageIndex;
+        final int offset;
+
+        ScrollAnchor(int messageIndex, int offset) {
+            this.messageIndex = messageIndex;
+            this.offset = offset;
+        }
+    }
+
     private static class HttpResult {
         final int status;
         final String body;
@@ -1501,6 +1511,7 @@ public class MainActivity extends Activity {
         boolean promptFocused = threadPromptInput != null && threadPromptInput.hasFocus();
         int promptSelection = promptFocused ? Math.max(0, threadPromptInput.getSelectionStart()) : 0;
         boolean wasNearBottom = isNearThreadBottom();
+        ScrollAnchor scrollAnchor = !prepend && !wasNearBottom ? captureThreadScrollAnchor() : null;
 
         if (thread != null) {
             currentThreadId = thread.optString("id");
@@ -1550,6 +1561,8 @@ public class MainActivity extends Activity {
             } else {
                 if (wasNearBottom) {
                     scrollThreadToBottom(false);
+                } else {
+                    restoreThreadScrollAnchor(scrollAnchor, previousScrollY);
                 }
                 if (!currentThreadActive) {
                     maybeRunQueuedTurn();
@@ -2371,6 +2384,14 @@ public class MainActivity extends Activity {
     }
 
     private void scrollToThreadBottom() {
+        if (!currentThreadFullLoaded
+                && currentThreadId != null
+                && !currentThreadId.isEmpty()
+                && loadedRangeEnd > 0
+                && totalThreadMessages > loadedRangeEnd) {
+            loadThreadPage(currentThreadId, currentThreadTitle, null, false, false);
+            return;
+        }
         scrollThreadToBottom(true);
     }
 
@@ -2405,6 +2426,38 @@ public class MainActivity extends Activity {
         if (inputMethodManager != null) {
             inputMethodManager.showSoftInput(threadPromptInput, InputMethodManager.SHOW_IMPLICIT);
         }
+    }
+
+    private ScrollAnchor captureThreadScrollAnchor() {
+        if (rootScrollView == null || renderedMessageViews.isEmpty()) {
+            return null;
+        }
+        int scrollY = rootScrollView.getScrollY();
+        for (int index = 0; index < renderedMessageViews.size(); index++) {
+            View view = renderedMessageViews.get(index);
+            int top = scrollYFor(view);
+            int bottom = top + view.getHeight();
+            if (bottom >= scrollY) {
+                return new ScrollAnchor(index, scrollY - top);
+            }
+        }
+        int lastIndex = renderedMessageViews.size() - 1;
+        View last = renderedMessageViews.get(lastIndex);
+        return new ScrollAnchor(lastIndex, scrollY - scrollYFor(last));
+    }
+
+    private void restoreThreadScrollAnchor(ScrollAnchor anchor, int fallbackScrollY) {
+        if (rootScrollView == null) {
+            return;
+        }
+        if (anchor == null || renderedMessageViews.isEmpty()) {
+            rootScrollView.scrollTo(0, Math.max(0, fallbackScrollY));
+            return;
+        }
+        int index = Math.min(Math.max(0, anchor.messageIndex), renderedMessageViews.size() - 1);
+        View view = renderedMessageViews.get(index);
+        int target = scrollYFor(view) + anchor.offset;
+        rootScrollView.scrollTo(0, Math.max(0, target));
     }
 
     private int scrollYFor(View target) {
@@ -3294,6 +3347,9 @@ public class MainActivity extends Activity {
         String endpoint = normalizedEndpoint();
         String token = tokenInput.getText().toString().trim();
         String threadId = currentThreadId;
+        boolean promptFocused = threadPromptInput != null && threadPromptInput.hasFocus();
+        boolean followLatest = isNearThreadBottom() && !promptFocused;
+        Integer before = !followLatest && !currentThreadFullLoaded && loadedRangeEnd > 0 ? loadedRangeEnd : null;
         if (endpoint.isEmpty()) {
             stopThreadPoll();
             return;
@@ -3302,7 +3358,7 @@ public class MainActivity extends Activity {
         isPollingThread = true;
         networkExecutor.execute(() -> {
             try {
-                String threadEndpoint = threadEndpointFor(endpoint, threadId, null, false);
+                String threadEndpoint = threadEndpointFor(endpoint, threadId, before, false);
                 String body = getCatalog(threadEndpoint, token);
                 JSONObject response = new JSONObject(body);
                 mainHandler.post(() -> {

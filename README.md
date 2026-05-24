@@ -43,6 +43,7 @@ The native Android prototype is now useful as a private phone companion MVP:
 - exposes a project file picker for recently changed/generated files, including direct APK downloads and in-app text previews
 - attempts to interrupt an active turn when the app-server exposes the active turn id
 - opens directly into a denser chat list, keeps connection settings collapsed, and preserves the composer/keyboard during active-chat polling
+- anchors the visible transcript while you read; active output only auto-follows when the bottom of the chat is already visible
 
 ## APK Download
 
