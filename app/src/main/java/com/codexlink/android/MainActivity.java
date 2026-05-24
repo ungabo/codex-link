@@ -787,7 +787,14 @@ public class MainActivity extends Activity {
         }
         endpointInput.setText(endpoint == null ? "" : endpoint);
         tokenInput.setText(token == null ? "" : token);
-        setStatus("Using " + connectionModeLabel() + ".", false);
+        if (MODE_WEB.equals(mode)) {
+            endpointInput.setText(normalizedEndpoint());
+        }
+        if (MODE_WEB.equals(mode) && !DEFAULT_WEB_TOKEN.isEmpty() && DEFAULT_WEB_TOKEN.equals(token)) {
+            setStatus("Using Web Link with included test token.", false);
+        } else {
+            setStatus("Using " + connectionModeLabel() + ".", false);
+        }
     }
 
     private String connectionModeLabel() {
@@ -3149,6 +3156,27 @@ public class MainActivity extends Activity {
         }
         if (start > 0) {
             endpoint = endpoint.substring(start).trim();
+        }
+        return normalizeWebLinkEndpoint(endpoint);
+    }
+
+    private String normalizeWebLinkEndpoint(String endpoint) {
+        if (!MODE_WEB.equals(currentConnectionMode) || endpoint.isEmpty()) {
+            return endpoint;
+        }
+        try {
+            URL url = new URL(endpoint);
+            String host = url.getHost() == null ? "" : url.getHost().toLowerCase(Locale.US);
+            String path = url.getPath() == null ? "" : url.getPath();
+            if (host.endsWith("sitesindevelopment.com") && path.startsWith("/codex-link")) {
+                if (!path.startsWith("/codex-link/index.php")) {
+                    return new URL(url.getProtocol(), url.getHost(), url.getPort(), "/codex-link/index.php/link").toString();
+                }
+                if ("/codex-link/index.php".equals(path) || "/codex-link/index.php/".equals(path)) {
+                    return new URL(url.getProtocol(), url.getHost(), url.getPort(), "/codex-link/index.php/link").toString();
+                }
+            }
+        } catch (Exception ignored) {
         }
         return endpoint;
     }
