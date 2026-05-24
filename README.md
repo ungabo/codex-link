@@ -27,8 +27,8 @@ The native Android prototype is now useful as a private phone companion MVP:
 - lists Codex desktop chats/projects from local Codex state
 - opens any listed chat, including this current chat
 - loads the newest transcript window first instead of the whole chat
-- loads older messages with `Older`
-- has compact fixed `Refresh`, `End`, and `Actions` controls, with secondary chat actions inside the accordion
+- loads older messages with `Older` and can load a full transcript with `Full`
+- has compact fixed `Chats`, `Refresh`, `Files`, and `Actions` controls, with secondary chat actions inside the accordion
 - uses full-width transcript text instead of nested message cards
 - merges consecutive messages from the same role into paragraph-separated blocks
 - replaces image references with lazy placeholders
@@ -42,7 +42,8 @@ The native Android prototype is now useful as a private phone companion MVP:
 - exposes phone controls for Git status, diff preview, checkpoint, and revert to last checkpoint
 - exposes a project file picker for recently changed/generated files, including direct APK downloads and in-app text previews
 - attempts to interrupt an active turn when the app-server exposes the active turn id
-- opens directly into a denser chat list, keeps connection settings collapsed, and preserves the composer/keyboard during active-chat polling
+- opens directly into a denser chat list, keeps connection settings collapsed, and keeps the composer visible above the keyboard
+- collapses the expanded Actions panel when the composer receives focus, so typing does not leave a huge toolbar over the chat
 - anchors the visible transcript while you read; active output only auto-follows when the bottom of the chat is already visible
 
 ## APK Download
@@ -87,7 +88,7 @@ For public Web Link access, use:
 C:\Users\Gabe\Desktop\Codex Link Web Tunnel.lnk
 ```
 
-The web tunnel starts the local bridge on `127.0.0.1:18765` if needed, then polls the PHP relay uploaded to `https://www.sitesindevelopment.com/codex-link/`.
+The LAN shortcut starts the local bridge on `0.0.0.0:18765` so the phone can reach it over Wi-Fi. The web tunnel starts or uses a local bridge and then polls the PHP relay uploaded to `https://www.sitesindevelopment.com/codex-link/`.
 
 It serves:
 
@@ -141,21 +142,23 @@ Reports and raw JSON-RPC logs are written under `phase0-validation\reports` and 
 Physical phone tested:
 
 ```text
-10.0.0.116:33281
+RZCX625807M
 SM_A546U
 ```
 
 Verified on the phone:
 
-- current chat opens and mirrors recent transcript content
-- fixed jump controls remain available
-- `Older` expands the loaded range
-- `Bottom` stays inside the transcript view
+- local Windows mode refreshes the live desktop catalog through `http://10.0.0.211:18765/link`
+- chats open and mirror recent transcript content
+- fixed jump controls remain available as floating up/down buttons
+- `Older`, `Top`, `Full`, and compact chat search are exposed inside the Actions accordion
 - the fixed top composer stays visible above the keyboard
+- tapping the composer collapses expanded Actions controls before the keyboard comes up
 - the composer sends to the current thread and refreshes with the Codex reply
 - active chats show `Queue` instead of `Send`
 - queued messages render with `Edit` and `Delete`; delete was verified on-device
 - `Host` reports the bridge online
+- scroll anchoring keeps the same visible message at the same bounds through a poll interval while reading away from the bottom
 
 Latest successful phone-originated smoke reply:
 

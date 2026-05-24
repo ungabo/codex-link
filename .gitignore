@@ -20,6 +20,7 @@ desktop_bridge/*.txt
 desktop_bridge/*.jsonl
 desktop_bridge/*.err
 desktop_bridge/*.out
+desktop_bridge/checkpoints.json
 desktop_bridge/logs/
 desktop_bridge/tmp/
 desktop_bridge/uploaded_images/

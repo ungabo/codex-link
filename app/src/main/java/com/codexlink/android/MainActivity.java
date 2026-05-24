@@ -261,7 +261,7 @@ public class MainActivity extends Activity {
 
         Uri uri = data.getData();
         if (uri == null) {
-            setThreadTurnStatus("No file selected.", true);
+            setThreadTurnStatus("No image selected.", true);
             return;
         }
 
@@ -276,10 +276,10 @@ public class MainActivity extends Activity {
         selectedImageName = displayNameForUri(uri);
         selectedImageMimeType = getContentResolver().getType(uri);
         if (selectedImageMimeType == null || selectedImageMimeType.isEmpty()) {
-            selectedImageMimeType = "application/octet-stream";
+            selectedImageMimeType = "image/*";
         }
         updateAttachmentPreview();
-        setThreadTurnStatus("File attached.", false);
+        setThreadTurnStatus("Image attached.", false);
     }
 
     private View buildContentView() {
@@ -468,11 +468,18 @@ public class MainActivity extends Activity {
 
         row.addView(spacer(dp(6)));
 
-        threadPromptInput = input("Message Codex in this chat", true);
+        threadPromptInput = input("Message Codex", true);
         threadPromptInput.setMinLines(1);
         threadPromptInput.setMaxLines(4);
         threadPromptInput.setTextSize(14);
         threadPromptInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        threadPromptInput.setOnFocusChangeListener((view, hasFocus) -> {
+            if (hasFocus && threadActionsExpanded) {
+                threadActionsExpanded = false;
+                renderThreadControls(currentThreadFullLoaded);
+                restoreThreadPromptFocus(threadPromptInput.length());
+            }
+        });
         row.addView(threadPromptInput, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
         row.addView(spacer(dp(6)));
@@ -1836,20 +1843,21 @@ public class MainActivity extends Activity {
         threadControlsLayout.addView(summaryView, matchWrap());
 
         threadControlsLayout.addView(buildPrimaryThreadControlRow(full), matchWrap());
-        if (threadActionsExpanded) {
-            threadControlsLayout.addView(buildThreadActionRow(), matchWrap());
-            threadControlsLayout.addView(buildProjectActionRow(), matchWrap());
-            threadControlsLayout.addView(buildThreadSearchRow(), matchWrap());
-        }
         if (threadComposerLayout != null) {
             threadControlsLayout.addView(threadComposerLayout, matchWrap());
             threadComposerLayout.setVisibility(View.VISIBLE);
             threadSendButton.setEnabled(true);
             threadSendButton.setText(currentThreadActive || isSendingThreadTurn ? "Queue" : "Send");
             threadPromptInput.setHint(currentThreadActive
-                    ? "Queue a message for this chat"
-                    : "Message Codex in this chat");
+                    ? "Queue message"
+                    : "Message Codex");
             renderQueuedTurns();
+        }
+        if (threadActionsExpanded) {
+            threadControlsLayout.addView(buildThreadNavigationRow(), matchWrap());
+            threadControlsLayout.addView(buildThreadActionRow(), matchWrap());
+            threadControlsLayout.addView(buildProjectActionRow(), matchWrap());
+            threadControlsLayout.addView(buildThreadSearchRow(), matchWrap());
         }
     }
 

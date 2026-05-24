@@ -1,6 +1,6 @@
 # Download The Android APK
 
-Current APK build: `0.1.10`
+Current APK build: `0.1.11`
 
 Use this direct APK download link from your phone:
 
