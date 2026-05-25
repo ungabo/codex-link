@@ -2727,9 +2727,23 @@ public class MainActivity extends Activity {
 
         ArrayList<JSONObject> items = new ArrayList<>();
         ArrayList<String> labels = new ArrayList<>();
+        JSONObject latestApk = response.optJSONObject("latestApk");
+        String pinnedApkKey = "";
+        if (latestApk != null && !latestApk.optString("downloadUrl", "").isEmpty()) {
+            try {
+                latestApk.put("featuredLatestApk", true);
+            } catch (JSONException ignored) {
+            }
+            items.add(latestApk);
+            labels.add(formatProjectFileLabel(latestApk));
+            pinnedApkKey = projectFileIdentity(latestApk);
+        }
         for (int index = 0; index < files.length(); index++) {
             JSONObject item = files.optJSONObject(index);
             if (item == null) {
+                continue;
+            }
+            if (!pinnedApkKey.isEmpty() && pinnedApkKey.equals(projectFileIdentity(item))) {
                 continue;
             }
             items.add(item);
@@ -2749,6 +2763,7 @@ public class MainActivity extends Activity {
     }
 
     private String formatProjectFileLabel(JSONObject file) {
+        boolean featuredLatestApk = file.optBoolean("featuredLatestApk", false);
         String path = file.optString("path", file.optString("name", "file"));
         String size = formatBytes(file.optLong("sizeBytes", 0));
         long modifiedAtMs = file.optLong("modifiedAtMs", 0);
@@ -2756,6 +2771,9 @@ public class MainActivity extends Activity {
         String kind = file.optString("kind", "file");
         String rootLabel = file.optString("rootLabel", "");
         StringBuilder builder = new StringBuilder();
+        if (featuredLatestApk) {
+            builder.append("Latest APK download\n");
+        }
         if (!rootLabel.isEmpty()) {
             builder.append(rootLabel).append(": ");
         }
@@ -2765,6 +2783,14 @@ public class MainActivity extends Activity {
             builder.append(" - ").append(modified);
         }
         return builder.toString();
+    }
+
+    private String projectFileIdentity(JSONObject file) {
+        String downloadUrl = file.optString("downloadUrl", "");
+        if (!downloadUrl.isEmpty()) {
+            return downloadUrl;
+        }
+        return file.optString("rootKey", "") + ":" + file.optString("path", file.optString("name", ""));
     }
 
     private String formatBytes(long bytes) {

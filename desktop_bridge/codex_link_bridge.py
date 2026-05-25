@@ -1204,6 +1204,7 @@ def project_file_list(cwd: str, thread_id: str, chat_path: str = "") -> dict[str
         records.extend(collect_project_files(root, thread_id, root_key, root_label))
 
     records.sort(key=project_file_sort_key)
+    latest_apk = next((record for record in records if str(record.get("extension") or "").lower() == ".apk"), None)
     return {
         "ok": True,
         "cwd": clean_windows_path(cwd),
@@ -1213,6 +1214,7 @@ def project_file_list(cwd: str, thread_id: str, chat_path: str = "") -> dict[str
             {"key": root_key, "label": root_label, "path": clean_windows_path(str(root))}
             for root_key, root_label, root in roots
         ],
+        "latestApk": latest_apk,
         "files": records[:MAX_PROJECT_FILE_RESULTS],
         "truncated": len(records) > MAX_PROJECT_FILE_RESULTS,
         "maxFileBytes": MAX_PROJECT_FILE_BYTES,
