@@ -38,6 +38,7 @@ The native Android prototype is now useful as a private phone companion MVP:
 - shows explicit idle/processing/sending/queued status in the open chat composer
 - pumps queued messages as soon as the opened chat refreshes back to idle
 - keeps queued messages collapsed by default so they do not consume the chat view
+- offers a force-send control for the next queued message; backend conflicts still keep the message queued
 - lets queued phone messages be edited or deleted before they run
 - exposes queued messages across chats so a hidden queue is not stranded inside one thread
 - polls an active opened chat and refreshes new transcript output at the bottom
@@ -45,6 +46,7 @@ The native Android prototype is now useful as a private phone companion MVP:
 - previews or clears a selected image before sending
 - sends follow-up prompts from the phone through `codex app-server` with workspace-write access limited to the mapped project root
 - tracks the Codex chat/transcript folder separately from the writable project folder and can infer real projects from transcript-looking folders when they contain project markers
+- clears orphaned/stale processing locks when a transcript has no recent activity
 - persists queued phone messages per chat across app restarts
 - can start a new Codex chat in the currently opened chat's project folder
 - exposes phone controls for Git status, diff preview, checkpoint, and revert to last checkpoint

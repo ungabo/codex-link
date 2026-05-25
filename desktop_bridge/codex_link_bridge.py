@@ -28,7 +28,8 @@ MAX_THREAD_LIMIT = 250
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 MAX_UPLOAD_IMAGES = 4
-ACTIVE_TURN_STALE_SECONDS = 4 * 60 * 60
+ACTIVE_TURN_STALE_SECONDS = 30 * 60
+ACTIVE_TURN_QUIET_STALE_SECONDS = 8 * 60
 ACTIVITY_TAIL_BYTES = 512 * 1024
 UPLOAD_ROOT = PROJECT_ROOT / "desktop_bridge" / "uploaded_images"
 CHECKPOINTS_PATH = PROJECT_ROOT / "desktop_bridge" / "checkpoints.json"
@@ -399,6 +400,16 @@ def iso_from_seconds(value: Any) -> str | None:
     return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def seconds_from_timestamp(value: str) -> float:
+    if not value:
+        return 0
+    try:
+        clean_value = value.replace("Z", "+00:00")
+        return datetime.fromisoformat(clean_value).timestamp()
+    except ValueError:
+        return 0
+
+
 def load_global_state(codex_home: Path) -> dict[str, Any]:
     path = codex_home / ".codex-global-state.json"
     if not path.exists():
@@ -448,6 +459,7 @@ def iter_recent_jsonl(path: Path, tail_bytes: int = ACTIVITY_TAIL_BYTES):
 def thread_activity_for_path(rollout_path: Path, *, tail_only: bool = True) -> dict[str, Any]:
     active_turns: dict[str, dict[str, Any]] = {}
     last_event_at = ""
+    last_event_seconds = 0.0
 
     if not rollout_path.exists():
         return {"status": "idle", "active": False, "lastEventAt": last_event_at}
@@ -463,6 +475,9 @@ def thread_activity_for_path(rollout_path: Path, *, tail_only: bool = True) -> d
             timestamp = str(event.get("timestamp") or "")
             if timestamp:
                 last_event_at = timestamp
+                parsed_timestamp = seconds_from_timestamp(timestamp)
+                if parsed_timestamp:
+                    last_event_seconds = parsed_timestamp
 
             if event.get("type") != "event_msg":
                 continue
@@ -503,6 +518,17 @@ def thread_activity_for_path(rollout_path: Path, *, tail_only: bool = True) -> d
             "status": "idle",
             "active": False,
             "staleActive": True,
+            "staleReason": "started-too-long-ago",
+            "activeTurnId": active.get("turnId", ""),
+            "activeStartedAt": active.get("startedAt", ""),
+            "lastEventAt": last_event_at,
+        }
+    if last_event_seconds and now_seconds - last_event_seconds > ACTIVE_TURN_QUIET_STALE_SECONDS:
+        return {
+            "status": "idle",
+            "active": False,
+            "staleActive": True,
+            "staleReason": "no-recent-thread-activity",
             "activeTurnId": active.get("turnId", ""),
             "activeStartedAt": active.get("startedAt", ""),
             "lastEventAt": last_event_at,
@@ -573,6 +599,8 @@ def load_threads(codex_home: Path, global_state: dict[str, Any]) -> tuple[list[d
                     "pinned": row["id"] in pinned_thread_ids,
                     "status": activity["status"],
                     "active": activity["active"],
+                    "staleActive": activity.get("staleActive", False),
+                    "staleReason": activity.get("staleReason", ""),
                     "activeTurnId": activity.get("activeTurnId", ""),
                     "activeStartedAt": activity.get("activeStartedAt", ""),
                 }
@@ -779,6 +807,8 @@ def read_thread(
             "preview": row["preview"] or "",
             "status": activity["status"],
             "active": activity["active"],
+            "staleActive": activity.get("staleActive", False),
+            "staleReason": activity.get("staleReason", ""),
             "activeTurnId": activity.get("activeTurnId", ""),
             "activeStartedAt": activity.get("activeStartedAt", ""),
         },

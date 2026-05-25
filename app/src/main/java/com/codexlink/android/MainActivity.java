@@ -90,6 +90,7 @@ public class MainActivity extends Activity {
     private static final String STATE_THREAD_CWD = "thread_cwd";
     private static final String STATE_THREAD_CHAT_PATH = "thread_chat_path";
     private static final String STATE_THREAD_ACTIVE_TURN_ID = "thread_active_turn_id";
+    private static final String STATE_THREAD_STALE_REASON = "thread_stale_reason";
     private static final String STATE_THREAD_SEARCH = "thread_search";
     private static final String STATE_THREAD_MESSAGES = "thread_messages";
     private static final String STATE_DRAFT = "draft";
@@ -103,6 +104,7 @@ public class MainActivity extends Activity {
     private static final String STATE_SCROLL_Y = "scroll_y";
     private static final String STATE_HAS_MORE = "has_more";
     private static final String STATE_THREAD_ACTIVE = "thread_active";
+    private static final String STATE_THREAD_STALE_ACTIVE = "thread_stale_active";
     private static final String STATE_ACTIONS_EXPANDED = "actions_expanded";
     private static final String STATE_QUEUE_EXPANDED = "queue_expanded";
     private static final String STATE_FULL_LOADED = "full_loaded";
@@ -178,6 +180,7 @@ public class MainActivity extends Activity {
     private String currentThreadCwd = "";
     private String currentThreadChatPath = "";
     private String currentThreadActiveTurnId = "";
+    private String currentThreadStaleReason = "";
     private String currentThreadSearchQuery = "";
     private String currentConnectionMode = MODE_LOCAL;
     private String queueThreadId;
@@ -195,6 +198,7 @@ public class MainActivity extends Activity {
     private boolean isLoadingThreadPage = false;
     private boolean isSendingThreadTurn = false;
     private boolean currentThreadActive = false;
+    private boolean currentThreadStaleActive = false;
     private boolean isPollingThread = false;
     private boolean hasLoadedCatalog = false;
     private boolean threadActionsExpanded = false;
@@ -321,6 +325,7 @@ public class MainActivity extends Activity {
         outState.putString(STATE_THREAD_CWD, currentThreadCwd);
         outState.putString(STATE_THREAD_CHAT_PATH, currentThreadChatPath);
         outState.putString(STATE_THREAD_ACTIVE_TURN_ID, currentThreadActiveTurnId);
+        outState.putString(STATE_THREAD_STALE_REASON, currentThreadStaleReason);
         outState.putString(STATE_THREAD_SEARCH, currentThreadSearchQuery);
         outState.putString(STATE_THREAD_MESSAGES, loadedThreadMessages.toString());
         outState.putString(STATE_DRAFT, threadPromptInput == null ? "" : threadPromptInput.getText().toString());
@@ -334,6 +339,7 @@ public class MainActivity extends Activity {
         outState.putInt(STATE_SCROLL_Y, rootScrollView == null ? 0 : rootScrollView.getScrollY());
         outState.putBoolean(STATE_HAS_MORE, hasMoreThreadMessages);
         outState.putBoolean(STATE_THREAD_ACTIVE, currentThreadActive);
+        outState.putBoolean(STATE_THREAD_STALE_ACTIVE, currentThreadStaleActive);
         outState.putBoolean(STATE_ACTIONS_EXPANDED, threadActionsExpanded);
         outState.putBoolean(STATE_QUEUE_EXPANDED, queuedTurnsExpanded);
         outState.putBoolean(STATE_FULL_LOADED, currentThreadFullLoaded);
@@ -986,12 +992,14 @@ public class MainActivity extends Activity {
         currentThreadCwd = state.getString(STATE_THREAD_CWD, "");
         currentThreadChatPath = state.getString(STATE_THREAD_CHAT_PATH, "");
         currentThreadActiveTurnId = state.getString(STATE_THREAD_ACTIVE_TURN_ID, "");
+        currentThreadStaleReason = state.getString(STATE_THREAD_STALE_REASON, "");
         currentThreadSearchQuery = state.getString(STATE_THREAD_SEARCH, "");
         loadedRangeStart = state.getInt(STATE_RANGE_START, 0);
         loadedRangeEnd = state.getInt(STATE_RANGE_END, 0);
         totalThreadMessages = state.getInt(STATE_TOTAL_MESSAGES, 0);
         hasMoreThreadMessages = state.getBoolean(STATE_HAS_MORE, false);
         currentThreadActive = state.getBoolean(STATE_THREAD_ACTIVE, false);
+        currentThreadStaleActive = state.getBoolean(STATE_THREAD_STALE_ACTIVE, false);
         threadActionsExpanded = state.getBoolean(STATE_ACTIONS_EXPANDED, false);
         queuedTurnsExpanded = state.getBoolean(STATE_QUEUE_EXPANDED, false);
         currentThreadFullLoaded = state.getBoolean(STATE_FULL_LOADED, false);
@@ -1058,7 +1066,9 @@ public class MainActivity extends Activity {
             currentThreadCwd = state.optString(STATE_THREAD_CWD, "");
             currentThreadChatPath = state.optString(STATE_THREAD_CHAT_PATH, "");
             currentThreadActiveTurnId = state.optString(STATE_THREAD_ACTIVE_TURN_ID, "");
+            currentThreadStaleReason = state.optString(STATE_THREAD_STALE_REASON, "");
             currentThreadSearchQuery = state.optString(STATE_THREAD_SEARCH, "");
+            currentThreadStaleActive = state.optBoolean(STATE_THREAD_STALE_ACTIVE, false);
             currentThreadFullLoaded = state.optBoolean(STATE_FULL_LOADED, false);
             threadActionsExpanded = state.optBoolean(STATE_ACTIONS_EXPANDED, false);
             queuedTurnsExpanded = state.optBoolean(STATE_QUEUE_EXPANDED, false);
@@ -1111,7 +1121,9 @@ public class MainActivity extends Activity {
                     .put(STATE_THREAD_CWD, currentThreadCwd)
                     .put(STATE_THREAD_CHAT_PATH, currentThreadChatPath)
                     .put(STATE_THREAD_ACTIVE_TURN_ID, currentThreadActiveTurnId)
+                    .put(STATE_THREAD_STALE_REASON, currentThreadStaleReason)
                     .put(STATE_THREAD_SEARCH, currentThreadSearchQuery)
+                    .put(STATE_THREAD_STALE_ACTIVE, currentThreadStaleActive)
                     .put(STATE_DRAFT, threadPromptInput == null ? "" : threadPromptInput.getText().toString())
                     .put(STATE_SELECTED_IMAGE_URI, selectedImageUri == null ? "" : selectedImageUri.toString())
                     .put(STATE_SELECTED_IMAGE_NAME, selectedImageName)
@@ -1478,6 +1490,12 @@ public class MainActivity extends Activity {
         if (currentThreadId != null && !currentThreadId.isEmpty()) {
             builder.append("\n\nOpen chat: ").append(currentThreadTitle == null || currentThreadTitle.isEmpty() ? currentThreadId : currentThreadTitle);
             builder.append("\nState: ").append(currentThreadActive ? "running" : "idle");
+            if (currentThreadStaleActive) {
+                builder.append(" (stale cleared)");
+                if (!currentThreadStaleReason.isEmpty()) {
+                    builder.append(" - ").append(currentThreadStaleReason);
+                }
+            }
             builder.append("\nQueue: ").append(processingStatusText());
             if (!currentThreadCwd.isEmpty()) {
                 builder.append("\nProject: ").append(currentThreadCwd);
@@ -1997,6 +2015,8 @@ public class MainActivity extends Activity {
             currentThreadCwd = firstNonEmpty(thread, "projectPath", "cwd");
             currentThreadChatPath = firstNonEmpty(thread, "chatPath", "originalCwd");
             currentThreadActive = thread.optBoolean("active");
+            currentThreadStaleActive = thread.optBoolean("staleActive");
+            currentThreadStaleReason = thread.optString("staleReason", "");
             currentThreadActiveTurnId = thread.optString("activeTurnId", "");
             ensureQueueLoadedForCurrentThread();
         }
@@ -3100,6 +3120,7 @@ public class MainActivity extends Activity {
         currentThreadCwd = "";
         currentThreadChatPath = "";
         currentThreadActiveTurnId = "";
+        currentThreadStaleReason = "";
         loadedRangeStart = 0;
         loadedRangeEnd = 0;
         totalThreadMessages = 0;
@@ -3108,6 +3129,7 @@ public class MainActivity extends Activity {
         isLoadingThreadPage = false;
         isSendingThreadTurn = false;
         currentThreadActive = false;
+        currentThreadStaleActive = false;
         threadActionsExpanded = false;
         queuedTurnsExpanded = false;
         currentThreadFullLoaded = false;
@@ -3525,6 +3547,25 @@ public class MainActivity extends Activity {
         mainHandler.postDelayed(this::maybeRunQueuedTurn, 250);
     }
 
+    private void forceSendNextQueuedTurn() {
+        ensureQueueLoadedForCurrentThread();
+        if (queuedThreadTurns.isEmpty()) {
+            setThreadTurnStatus("No queued message to send.", false);
+            return;
+        }
+        if (isSendingThreadTurn) {
+            setThreadTurnStatus("A queued message is already sending.", false);
+            return;
+        }
+        currentThreadActive = false;
+        currentThreadStaleActive = false;
+        currentThreadStaleReason = "";
+        currentThreadActiveTurnId = "";
+        stopThreadPoll();
+        setThreadTurnStatus("Trying queued message now. Backend conflicts will keep it queued.", false);
+        sendQueuedTurn(queuedThreadTurns.get(0));
+    }
+
     private void sendQueuedTurn(QueuedTurn turn) {
         if (turn == null || currentThreadId == null || currentThreadId.isEmpty()) {
             return;
@@ -3651,6 +3692,13 @@ public class MainActivity extends Activity {
             }
             return "Codex is processing.";
         }
+        if (currentThreadStaleActive) {
+            int count = queuedThreadTurns.size();
+            if (count > 0) {
+                return "Recovered stale processing state. " + count + " queued message" + (count == 1 ? "" : "s") + " ready.";
+            }
+            return "Recovered stale processing state.";
+        }
         int count = queuedThreadTurns.size();
         if (count > 0) {
             return "Idle. " + count + " queued message" + (count == 1 ? "" : "s") + " ready.";
@@ -3687,7 +3735,15 @@ public class MainActivity extends Activity {
             queuedTurnsExpanded = !queuedTurnsExpanded;
             renderQueuedTurns();
         });
-        header.addView(toggleButton, new LinearLayout.LayoutParams(dp(66), dp(32)));
+        Button forceButton = toolbarButton(currentThreadActive ? "Force" : "Send", Color.WHITE, COLOR_ACCENT);
+        forceButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
+        forceButton.setEnabled(!isSendingThreadTurn);
+        forceButton.setOnClickListener(view -> forceSendNextQueuedTurn());
+        header.addView(forceButton, new LinearLayout.LayoutParams(dp(66), dp(32)));
+
+        header.addView(spacer(dp(4)));
+
+        header.addView(toggleButton, new LinearLayout.LayoutParams(dp(62), dp(32)));
         queuedTurnListLayout.addView(header, matchWrap());
 
         if (!queuedTurnsExpanded) {
@@ -3911,6 +3967,7 @@ public class MainActivity extends Activity {
                     QueueInfo info = queues.get(which);
                     loadThread(info.threadId, info.title);
                 })
+                .setPositiveButton("Force current", (dialog, which) -> forceSendNextQueuedTurn())
                 .setNegativeButton("Close", null)
                 .show();
     }
