@@ -38,6 +38,9 @@ public class CodexQueueService extends Service {
     static final String EXTRA_THREAD_ID = "thread_id";
     static final String EXTRA_STATUS = "status";
     static final String EXTRA_ERROR = "error";
+    static final String EXTRA_REQUEST_ID = "request_id";
+    static final String EXTRA_REQUEST_STAGE = "request_stage";
+    static final String EXTRA_REQUEST_SUMMARY = "request_summary";
 
     private static final String TAG = "CodexQueueService";
     private static final String PREFS = "codex_link";
@@ -188,35 +191,38 @@ public class CodexQueueService extends Service {
                     Log.i(TAG, "Queue thread " + queue.threadId + " active=" + state.active);
                     if (state.active) {
                         sawBusyThread = true;
-                        lastStatus = "Waiting for " + queue.threadId + " to finish.";
+                        lastStatus = "Desktop reports this chat is still processing. Queue will retry.";
+                        broadcastQueueChanged(queue.threadId, item, "Waiting", lastStatus, false);
                         continue;
                     }
 
                     String turnsEndpoint = threadTurnsEndpointFor(config.endpoint, queue.threadId);
                     Log.i(TAG, "Posting queued turn for " + queue.threadId + " to " + turnsEndpoint);
+                    broadcastQueueChanged(queue.threadId, item, "Sending", "Sent to desktop. Waiting for Codex to finish.", false);
                     HttpResult result = postJson(config, turnsEndpoint, item.payload);
                     Log.i(TAG, "Queued turn result for " + queue.threadId + ": HTTP " + result.status);
                     if (result.status == 409) {
                         sawBusyThread = true;
-                        lastStatus = "Codex is still processing for " + queue.threadId + ".";
+                        lastStatus = "Desktop reports this chat is still processing. Queue will retry.";
+                        broadcastQueueChanged(queue.threadId, item, "Waiting", lastStatus, false);
                         continue;
                     }
                     if (!result.isOk()) {
                         lastStatus = httpErrorMessage("Queued send", result);
                         Log.w(TAG, lastStatus);
-                        broadcastQueueChanged(queue.threadId, lastStatus, true);
+                        broadcastQueueChanged(queue.threadId, item, "Error", lastStatus, true);
                         continue;
                     }
 
                     removeQueuedItem(queue.threadId, item.id);
                     madeProgress = true;
-                    lastStatus = "Sent queued message.";
-                    broadcastQueueChanged(queue.threadId, lastStatus, false);
+                    lastStatus = "Completed by Codex.";
+                    broadcastQueueChanged(queue.threadId, item, "Completed", lastStatus, false);
                     break;
                 } catch (Exception error) {
                     lastStatus = error.getMessage() == null ? "Queued send failed." : error.getMessage();
                     Log.w(TAG, "Queue pass failed for " + queue.threadId, error);
-                    broadcastQueueChanged(queue.threadId, lastStatus, true);
+                    broadcastQueueChanged(queue.threadId, item, "Error", lastStatus, true);
                 }
             }
 
@@ -591,6 +597,35 @@ public class CodexQueueService extends Service {
         intent.putExtra(EXTRA_STATUS, status == null ? "" : status);
         intent.putExtra(EXTRA_ERROR, isError);
         sendBroadcast(intent);
+    }
+
+    private void broadcastQueueChanged(String threadId, QueueItem item, String stage, String status, boolean isError) {
+        Intent intent = new Intent(ACTION_QUEUE_CHANGED);
+        intent.setPackage(getPackageName());
+        intent.putExtra(EXTRA_THREAD_ID, threadId == null ? "" : threadId);
+        intent.putExtra(EXTRA_STATUS, status == null ? "" : status);
+        intent.putExtra(EXTRA_ERROR, isError);
+        intent.putExtra(EXTRA_REQUEST_ID, item == null ? "" : item.id);
+        intent.putExtra(EXTRA_REQUEST_STAGE, stage == null ? "" : stage);
+        intent.putExtra(EXTRA_REQUEST_SUMMARY, requestSummary(item));
+        sendBroadcast(intent);
+    }
+
+    private String requestSummary(QueueItem item) {
+        if (item == null || item.payload == null) {
+            return "";
+        }
+        String prompt = item.payload.optString("prompt", "").trim();
+        if (prompt.isEmpty()) {
+            prompt = "Image-only message";
+        }
+        JSONArray images = item.payload.optJSONArray("images");
+        int imageCount = images == null ? 0 : images.length();
+        if (imageCount > 0) {
+            prompt = prompt + " (" + imageCount + (imageCount == 1 ? " image" : " images") + ")";
+        }
+        prompt = prompt.replace('\r', ' ').replace('\n', ' ').trim();
+        return prompt.length() > 120 ? prompt.substring(0, 117).trim() + "..." : prompt;
     }
 
     private void sleepFor(long millis) {

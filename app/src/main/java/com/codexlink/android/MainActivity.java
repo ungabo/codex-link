@@ -82,6 +82,7 @@ public class MainActivity extends Activity {
     private static final String PREF_CATALOG_CACHE_AT = "catalog_cache_at";
     private static final String PREF_CATALOG_CACHE_ENDPOINT = "catalog_cache_endpoint";
     private static final String PREF_ACTIVE_THREAD_STATE = "active_thread_state";
+    private static final String PREF_REQUEST_STATUS_PREFIX = "request_status_";
     private static final String PREF_LAST_INSTALL_NOTIFICATION_VERSION = "last_install_notification_version";
     private static final String MODE_LOCAL = "local";
     private static final String MODE_WEB = "web";
@@ -141,6 +142,7 @@ public class MainActivity extends Activity {
     private TextView statusView;
     private TextView catalogStatusView;
     private TextView threadTurnStatusView;
+    private TextView requestStatusPillView;
     private TextView threadResponseText;
     private TextView attachmentStatusView;
     private TextView connectionSummaryView;
@@ -189,6 +191,10 @@ public class MainActivity extends Activity {
     private Uri selectedImageUri;
     private String selectedImageName = "";
     private String selectedImageMimeType = "";
+    private String lastRequestId = "";
+    private String lastRequestStage = "";
+    private String lastRequestSummary = "";
+    private String lastRequestDetail = "";
     private JSONArray editingQueuedImages;
     private JSONObject sendingThreadPayload;
     private int loadedRangeStart = 0;
@@ -196,6 +202,7 @@ public class MainActivity extends Activity {
     private int totalThreadMessages = 0;
     private int currentThreadSearchMatch = -1;
     private int fastPollRemaining = 0;
+    private long lastRequestAt = 0L;
     private boolean hasMoreThreadMessages = false;
     private boolean isLoadingThreadPage = false;
     private boolean isSendingThreadTurn = false;
@@ -209,6 +216,7 @@ public class MainActivity extends Activity {
     private boolean applyingConnectionMode = false;
     private boolean connectionExpanded = false;
     private boolean queueReceiverRegistered = false;
+    private boolean lastRequestIsError = false;
     private int loadedCatalogChatCount = 0;
     private JSONArray loadedCatalogChats = new JSONArray();
     private JSONArray loadedThreadMessages = new JSONArray();
@@ -703,6 +711,13 @@ public class MainActivity extends Activity {
         clearAttachmentButton.setOnClickListener(view -> clearSelectedImage());
         attachmentPreviewLayout.addView(clearAttachmentButton, new LinearLayout.LayoutParams(dp(62), dp(34)));
         composer.addView(attachmentPreviewLayout, matchWrap());
+
+        requestStatusPillView = text("", 12, COLOR_INK, Typeface.BOLD);
+        requestStatusPillView.setSingleLine(false);
+        requestStatusPillView.setMaxLines(3);
+        requestStatusPillView.setPadding(dp(10), dp(6), dp(10), dp(6));
+        requestStatusPillView.setVisibility(View.GONE);
+        composer.addView(requestStatusPillView, matchWrap());
 
         threadTurnStatusView = text("", 12, COLOR_MUTED, Typeface.NORMAL);
         threadTurnStatusView.setSingleLine(false);
