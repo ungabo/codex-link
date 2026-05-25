@@ -15,5 +15,9 @@ public class PackageReplacedReceiver extends BroadcastReceiver {
                 .edit()
                 .putInt("last_install_notification_version", BuildConfig.VERSION_CODE)
                 .apply();
+        try {
+            CodexQueueService.start(context);
+        } catch (Exception ignored) {
+        }
     }
 }

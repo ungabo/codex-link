@@ -3,10 +3,12 @@ package com.codexlink.android;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
@@ -206,6 +208,7 @@ public class MainActivity extends Activity {
     private boolean currentThreadFullLoaded = false;
     private boolean applyingConnectionMode = false;
     private boolean connectionExpanded = false;
+    private boolean queueReceiverRegistered = false;
     private int loadedCatalogChatCount = 0;
     private JSONArray loadedCatalogChats = new JSONArray();
     private JSONArray loadedThreadMessages = new JSONArray();
@@ -217,6 +220,12 @@ public class MainActivity extends Activity {
         @Override
         public void run() {
             pollCurrentThread();
+        }
+    };
+    private final BroadcastReceiver queueChangedReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            handleQueueWorkerUpdate(intent);
         }
     };
 
@@ -305,9 +314,28 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        registerQueueReceiver();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        recoverAfterForegroundReturn();
+    }
+
+    @Override
     protected void onPause() {
         saveActiveThreadState();
         super.onPause();
+    }
+
+    @Override
+    protected void onStop() {
+        saveActiveThreadState();
+        unregisterQueueReceiver();
+        super.onStop();
     }
 
     @Override
@@ -376,6 +404,41 @@ public class MainActivity extends Activity {
         }
         NotificationHelper.showInstalledNotification(this);
         preferences.edit().putInt(PREF_LAST_INSTALL_NOTIFICATION_VERSION, BuildConfig.VERSION_CODE).apply();
+    }
+
+    private void registerQueueReceiver() {
+        if (queueReceiverRegistered) {
+            return;
+        }
+        IntentFilter filter = new IntentFilter(CodexQueueService.ACTION_QUEUE_CHANGED);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(queueChangedReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(queueChangedReceiver, filter);
+        }
+        queueReceiverRegistered = true;
+    }
+
+    private void unregisterQueueReceiver() {
+        if (!queueReceiverRegistered) {
+            return;
+        }
+        try {
+            unregisterReceiver(queueChangedReceiver);
+        } catch (IllegalArgumentException ignored) {
+        }
+        queueReceiverRegistered = false;
+    }
+
+    private void recoverAfterForegroundReturn() {
+        if (currentThreadId != null && !currentThreadId.isEmpty()) {
+            reloadCurrentThreadQueueFromDisk();
+            updateThreadComposerState();
+            if (!normalizedEndpoint().isEmpty()) {
+                loadThreadPage(currentThreadId, currentThreadTitle, null, currentThreadFullLoaded, false);
+            }
+        }
+        startQueueWorkerIfNeeded();
     }
 
     @Override
@@ -3356,55 +3419,29 @@ public class MainActivity extends Activity {
         saveSettings();
         isSendingThreadTurn = true;
         updateThreadComposerState();
-        setThreadTurnStatus("Sending to Codex...", false);
+        setThreadTurnStatus("Preparing message...", false);
 
         networkExecutor.execute(() -> {
-            JSONObject payload = null;
             try {
-                payload = buildThreadTurnPayload(prompt, attachmentUri, attachmentName, attachmentMimeType, preservedImages);
-                JSONObject sendPayload = payload;
+                JSONObject payload = buildThreadTurnPayload(prompt, attachmentUri, attachmentName, attachmentMimeType, preservedImages);
                 mainHandler.post(() -> {
-                    sendingThreadPayload = sendPayload;
+                    isSendingThreadTurn = false;
                     threadPromptInput.setText("");
                     if (hasAttachment) {
                         clearSelectedImageState();
                         editingQueuedImages = null;
                         updateAttachmentPreview();
                     }
-                    rerenderCurrentThreadMessages();
-                    scrollThreadToBottom(true);
-                });
-                String turnsEndpoint = threadTurnsEndpointFor(endpoint, currentThreadId);
-                Log.i(TAG, "Sending thread turn to " + turnsEndpoint);
-                postThreadPayload(turnsEndpoint, token, sendPayload);
-                mainHandler.post(() -> {
-                    isSendingThreadTurn = false;
-                    if (samePayload(sendingThreadPayload, sendPayload)) {
-                        sendingThreadPayload = null;
-                    }
-                    updateThreadComposerState();
-                    setThreadTurnStatus("Codex replied.", false);
-                    loadThreadPage(currentThreadId, currentThreadTitle, null, false, false);
+                    queuePreparedThreadPayload(payload, "Queued. Sending in background.", false);
+                    startQueueWorker("Queued. Sending in background.");
+                    scheduleThreadPoll();
                 });
             } catch (Exception error) {
-                Log.e(TAG, "Thread turn failed", error);
-                JSONObject failedPayload = payload;
+                Log.e(TAG, "Thread queue failed", error);
                 mainHandler.post(() -> {
                     isSendingThreadTurn = false;
-                    if (samePayload(sendingThreadPayload, failedPayload)) {
-                        sendingThreadPayload = null;
-                    }
                     updateThreadComposerState();
-                    if (failedPayload != null) {
-                        queuePreparedThreadPayload(
-                                failedPayload,
-                                isConflictError(error)
-                                        ? "Codex is still processing. Message preserved in the queue."
-                                        : friendlyThreadError(error, "Send failed. Message preserved in the queue."),
-                                !isConflictError(error));
-                        return;
-                    }
-                    setThreadTurnStatus(friendlyThreadError(error, "Send failed."), true);
+                    setThreadTurnStatus(friendlyThreadError(error, "Could not queue message."), true);
                 });
             }
         });
@@ -3532,11 +3569,8 @@ public class MainActivity extends Activity {
     }
 
     private void maybeRunQueuedTurn() {
-        if (currentThreadActive || isSendingThreadTurn || queuedThreadTurns.isEmpty()) {
-            updateThreadComposerState();
-            return;
-        }
-        sendQueuedTurn(queuedThreadTurns.get(0));
+        updateThreadComposerState();
+        startQueueWorkerIfNeeded();
     }
 
     private void maybeRunQueuedTurnSoon() {
@@ -3547,9 +3581,55 @@ public class MainActivity extends Activity {
         mainHandler.postDelayed(this::maybeRunQueuedTurn, 250);
     }
 
-    private void forceSendNextQueuedTurn() {
+    private void startQueueWorkerIfNeeded() {
+        if (allQueueInfo().isEmpty()) {
+            return;
+        }
+        startQueueWorker("Queue worker running.");
+    }
+
+    private void startQueueWorker(String statusMessage) {
+        try {
+            CodexQueueService.start(this);
+            if (statusMessage != null && !statusMessage.isEmpty()) {
+                setThreadTurnStatus(statusMessage, false);
+            }
+        } catch (Exception error) {
+            setThreadTurnStatus(error.getMessage() == null ? "Could not start queue worker." : error.getMessage(), true);
+        }
+    }
+
+    private void reloadCurrentThreadQueueFromDisk() {
+        if (currentThreadId == null || currentThreadId.isEmpty()) {
+            unloadThreadQueue();
+            return;
+        }
+        queueThreadId = null;
         ensureQueueLoadedForCurrentThread();
-        if (queuedThreadTurns.isEmpty()) {
+    }
+
+    private void handleQueueWorkerUpdate(Intent intent) {
+        String threadId = intent == null ? "" : intent.getStringExtra(CodexQueueService.EXTRA_THREAD_ID);
+        String status = intent == null ? "" : intent.getStringExtra(CodexQueueService.EXTRA_STATUS);
+        boolean isError = intent != null && intent.getBooleanExtra(CodexQueueService.EXTRA_ERROR, false);
+        if (currentThreadId != null && !currentThreadId.isEmpty()) {
+            reloadCurrentThreadQueueFromDisk();
+            if (status != null && !status.isEmpty() && (threadId == null || threadId.isEmpty() || currentThreadId.equals(threadId))) {
+                setThreadTurnStatus(status, isError);
+            } else {
+                setThreadTurnStatus(processingStatusText(), false);
+            }
+            if (threadId != null && threadId.equals(currentThreadId) && !normalizedEndpoint().isEmpty()) {
+                loadThreadPage(currentThreadId, currentThreadTitle, null, currentThreadFullLoaded, false);
+            }
+        } else if (status != null && !status.isEmpty()) {
+            setCatalogStatus(status, isError);
+        }
+    }
+
+    private void forceSendQueuedTurn(QueuedTurn turn) {
+        ensureQueueLoadedForCurrentThread();
+        if (turn == null || !queuedThreadTurns.contains(turn)) {
             setThreadTurnStatus("No queued message to send.", false);
             return;
         }
@@ -3562,8 +3642,8 @@ public class MainActivity extends Activity {
         currentThreadStaleReason = "";
         currentThreadActiveTurnId = "";
         stopThreadPoll();
-        setThreadTurnStatus("Trying queued message now. Backend conflicts will keep it queued.", false);
-        sendQueuedTurn(queuedThreadTurns.get(0));
+        setThreadTurnStatus("Trying selected queued message now. Backend conflicts will keep it queued.", false);
+        sendQueuedTurn(turn);
     }
 
     private void sendQueuedTurn(QueuedTurn turn) {
@@ -3582,7 +3662,12 @@ public class MainActivity extends Activity {
 
         isSendingThreadTurn = true;
         sendingThreadPayload = turn.payload;
+        boolean removedBeforeSend = queuedThreadTurns.remove(turn);
+        if (removedBeforeSend) {
+            persistQueue();
+        }
         updateThreadComposerState();
+        renderQueuedTurns();
         rerenderCurrentThreadMessages();
         scrollThreadToBottom(true);
         setThreadTurnStatus("Sending queued message...", false);
@@ -3597,14 +3682,11 @@ public class MainActivity extends Activity {
                     if (samePayload(sendingThreadPayload, turn.payload)) {
                         sendingThreadPayload = null;
                     }
-                    queuedThreadTurns.remove(turn);
-                    persistQueue();
                     renderQueuedTurns();
                     updateThreadComposerState();
                     setThreadTurnStatus("Queued message sent.", false);
                     if (threadId.equals(currentThreadId)) {
                         loadThreadPage(threadId, threadTitle, null, false, false);
-                        maybeRunQueuedTurnSoon();
                     }
                 });
             } catch (Exception error) {
@@ -3620,6 +3702,10 @@ public class MainActivity extends Activity {
                         scheduleThreadPoll();
                     } else {
                         setThreadTurnStatus(friendlyThreadError(error, "Queued send failed."), true);
+                    }
+                    if (removedBeforeSend && !payloadIsQueued(turn.payload)) {
+                        queuedThreadTurns.add(0, turn);
+                        persistQueue();
                     }
                     renderQueuedTurns();
                     rerenderCurrentThreadMessages();
@@ -3735,14 +3821,6 @@ public class MainActivity extends Activity {
             queuedTurnsExpanded = !queuedTurnsExpanded;
             renderQueuedTurns();
         });
-        Button forceButton = toolbarButton(currentThreadActive ? "Force" : "Send", Color.WHITE, COLOR_ACCENT);
-        forceButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
-        forceButton.setEnabled(!isSendingThreadTurn);
-        forceButton.setOnClickListener(view -> forceSendNextQueuedTurn());
-        header.addView(forceButton, new LinearLayout.LayoutParams(dp(66), dp(32)));
-
-        header.addView(spacer(dp(4)));
-
         header.addView(toggleButton, new LinearLayout.LayoutParams(dp(62), dp(32)));
         queuedTurnListLayout.addView(header, matchWrap());
 
@@ -3770,6 +3848,14 @@ public class MainActivity extends Activity {
             row.setOrientation(LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.END);
             row.setPadding(0, dp(6), 0, 0);
+
+            Button tryButton = toolbarButton("Try now", Color.WHITE, COLOR_ACCENT);
+            tryButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
+            tryButton.setEnabled(!isSendingThreadTurn);
+            tryButton.setOnClickListener(view -> forceSendQueuedTurn(turn));
+            row.addView(tryButton, new LinearLayout.LayoutParams(dp(82), dp(34)));
+
+            row.addView(spacer(dp(6)));
 
             Button editButton = toolbarButton("Edit", Color.WHITE, COLOR_PRIMARY);
             editButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
@@ -3967,7 +4053,6 @@ public class MainActivity extends Activity {
                     QueueInfo info = queues.get(which);
                     loadThread(info.threadId, info.title);
                 })
-                .setPositiveButton("Force current", (dialog, which) -> forceSendNextQueuedTurn())
                 .setNegativeButton("Close", null)
                 .show();
     }

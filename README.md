@@ -38,7 +38,8 @@ The native Android prototype is now useful as a private phone companion MVP:
 - shows explicit idle/processing/sending/queued status in the open chat composer
 - pumps queued messages as soon as the opened chat refreshes back to idle
 - keeps queued messages collapsed by default so they do not consume the chat view
-- offers a force-send control for the next queued message; backend conflicts still keep the message queued
+- offers a per-message "Try now" control for a queued message; backend conflicts still keep the message queued
+- runs queued messages through a foreground queue worker so backgrounding, rotation, or switching chats does not strand them
 - lets queued phone messages be edited or deleted before they run
 - exposes queued messages across chats so a hidden queue is not stranded inside one thread
 - polls an active opened chat and refreshes new transcript output at the bottom
