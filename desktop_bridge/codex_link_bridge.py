@@ -102,6 +102,35 @@ PROJECT_FILE_EXCLUDED_PATH_PARTS = {
     "logs",
     "tmp",
 }
+PROJECT_ROOT_MARKER_FILES = {
+    "build.gradle",
+    "build.gradle.kts",
+    "cargo.toml",
+    "go.mod",
+    "package.json",
+    "pom.xml",
+    "pyproject.toml",
+    "settings.gradle",
+    "settings.gradle.kts",
+}
+PROJECT_ROOT_MARKER_SUFFIXES = {
+    ".csproj",
+    ".sln",
+}
+PROJECT_ROOT_SCAN_EXCLUDED_DIRS = {
+    ".git",
+    ".gradle",
+    ".idea",
+    ".next",
+    ".vscode",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "out",
+}
+PROJECT_ROOT_SCORE_THRESHOLD = 5
+MAX_PROJECT_ROOT_SCAN_DIRS = 250
 IMAGE_REF_RE = re.compile(
     r"!\[[^\]]*\]\(<?([^>)]+?)(?:>|\))|"
     r"\[[^\]]+\]\(<([^>]+\.(?:png|jpe?g|webp|gif))>\)|"
@@ -198,6 +227,84 @@ def is_codex_transcript_cwd(cwd: str) -> bool:
     return bool(clean_cwd) and is_under(clean_cwd, str(CODEX_TRANSCRIPT_ROOT))
 
 
+def project_root_score(path: Path) -> int:
+    try:
+        if not path.exists() or not path.is_dir():
+            return 0
+        entries = list(path.iterdir())
+    except OSError:
+        return 0
+
+    filenames = {entry.name.lower() for entry in entries if entry.is_file()}
+    dirnames = {entry.name.lower() for entry in entries if entry.is_dir()}
+    score = 0
+
+    if ".git" in dirnames:
+        score += 8
+    for marker in PROJECT_ROOT_MARKER_FILES:
+        if marker in filenames:
+            score += 6 if marker.startswith("settings.gradle") else 5
+    if any(entry.suffix.lower() in PROJECT_ROOT_MARKER_SUFFIXES for entry in entries if entry.is_file()):
+        score += 5
+    if "gradlew" in filenames or "gradlew.bat" in filenames:
+        score += 3
+    if "app" in dirnames:
+        app_dir = path / "app"
+        if (app_dir / "build.gradle").exists() or (app_dir / "build.gradle.kts").exists():
+            score += 4
+        if (app_dir / "src" / "main" / "AndroidManifest.xml").exists():
+            score += 3
+    if "src" in dirnames:
+        score += 1
+    if "readme.md" in filenames:
+        score += 1
+    return score
+
+
+def infer_project_root_from_chat_path(chat_path: str) -> tuple[str, str]:
+    clean_chat_path = clean_windows_path(chat_path)
+    if not clean_chat_path:
+        return "", ""
+    base = Path(clean_chat_path)
+    if not base.exists() or not base.is_dir():
+        return "", ""
+
+    base_score = project_root_score(base)
+    if base_score >= PROJECT_ROOT_SCORE_THRESHOLD:
+        return clean_windows_path(str(base.resolve())), "transcript-project-detected"
+
+    best_path: Path | None = None
+    best_score = 0
+    checked = 0
+    for dirpath, dirnames, _filenames in os.walk(base):
+        current = Path(dirpath)
+        try:
+            depth = len(current.relative_to(base).parts)
+        except ValueError:
+            depth = 0
+        if depth >= 2:
+            dirnames[:] = []
+        else:
+            dirnames[:] = [
+                name for name in dirnames
+                if name.lower() not in PROJECT_ROOT_SCAN_EXCLUDED_DIRS
+            ]
+
+        if current == base:
+            continue
+        checked += 1
+        if checked > MAX_PROJECT_ROOT_SCAN_DIRS:
+            break
+        score = project_root_score(current)
+        if score > best_score:
+            best_score = score
+            best_path = current
+
+    if best_path is not None and best_score >= PROJECT_ROOT_SCORE_THRESHOLD:
+        return clean_windows_path(str(best_path.resolve())), "transcript-child-project-detected"
+    return "", ""
+
+
 def validate_explicit_project_root(project_root: str) -> str:
     clean_root = clean_windows_path(project_root)
     if not clean_root:
@@ -206,6 +313,24 @@ def validate_explicit_project_root(project_root: str) -> str:
     if not path.exists() or not path.is_dir():
         raise ValueError(f"mapped project root does not exist: {clean_root}")
     return clean_windows_path(str(path.resolve()))
+
+
+def make_project_root_info(
+    project_path: str,
+    chat_path: str,
+    source: str,
+    error: str = "",
+) -> dict[str, Any]:
+    clean_project = clean_windows_path(project_path)
+    clean_chat = clean_windows_path(chat_path)
+    return {
+        "cwd": clean_project,
+        "projectPath": clean_project,
+        "chatPath": clean_chat,
+        "originalCwd": clean_chat,
+        "projectRootSource": source,
+        "projectRootError": error,
+    }
 
 
 def project_root_info(codex_home: Path, thread_id: str, cwd: str, *, strict: bool = False) -> dict[str, Any]:
@@ -218,46 +343,44 @@ def project_root_info(codex_home: Path, thread_id: str, cwd: str, *, strict: boo
             if strict:
                 raise
             return {
-                "cwd": "",
-                "originalCwd": clean_cwd,
-                "projectRootSource": source,
-                "projectRootError": str(error),
+                **make_project_root_info("", clean_cwd, source, str(error)),
             }
-        return {
-            "cwd": resolved,
-            "originalCwd": clean_cwd,
-            "projectRootSource": source,
-            "projectRootError": "",
-        }
+        return make_project_root_info(resolved, clean_cwd, source)
 
     if is_codex_transcript_cwd(clean_cwd):
+        inferred_root, inferred_source = infer_project_root_from_chat_path(clean_cwd)
+        if inferred_root:
+            return make_project_root_info(inferred_root, clean_cwd, inferred_source)
         if strict:
             raise ValueError(
-                "This chat points at a Codex transcript workspace, not a real project folder. "
+                "This chat has a Codex transcript/chat folder but no detectable writable project folder. "
                 "Add a mapping in desktop_bridge/project_mappings.json before sending from Android."
             )
-        return {
-            "cwd": "",
-            "originalCwd": clean_cwd,
-            "projectRootSource": "transcript-cwd-blocked",
-            "projectRootError": "Codex transcript workspace needs a real project mapping.",
-        }
+        return make_project_root_info(
+            "",
+            clean_cwd,
+            "transcript-cwd-blocked",
+            "Codex transcript/chat folder needs a real project mapping.",
+        )
 
     if strict:
         resolved = validate_cwd(codex_home, clean_cwd)
     else:
         resolved = clean_windows_path(str(Path(clean_cwd).resolve())) if clean_cwd and Path(clean_cwd).exists() else clean_cwd
-    return {
-        "cwd": resolved,
-        "originalCwd": clean_cwd,
-        "projectRootSource": "thread-cwd",
-        "projectRootError": "",
-    }
+    return make_project_root_info(resolved, clean_cwd, "thread-cwd")
+
+
+def resolve_thread_project_info(codex_home: Path, row: sqlite3.Row) -> dict[str, Any]:
+    info = project_root_info(codex_home, str(row["id"]), clean_windows_path(row["cwd"]), strict=True)
+    project_path = clean_windows_path(str(info.get("projectPath") or info.get("cwd") or ""))
+    if not project_path:
+        raise ValueError(str(info.get("projectRootError") or "missing writable project folder"))
+    return info
 
 
 def resolve_thread_project_cwd(codex_home: Path, row: sqlite3.Row) -> str:
-    info = project_root_info(codex_home, str(row["id"]), clean_windows_path(row["cwd"]), strict=True)
-    return str(info["cwd"])
+    info = resolve_thread_project_info(codex_home, row)
+    return str(info["projectPath"])
 
 
 def iso_from_ms(value: int | None) -> str | None:
@@ -436,6 +559,8 @@ def load_threads(codex_home: Path, global_state: dict[str, Any]) -> tuple[list[d
                     "displayTitle": display_title,
                     "originalTitle": original_title,
                     "cwd": root_info["cwd"],
+                    "projectPath": root_info["projectPath"],
+                    "chatPath": root_info["chatPath"],
                     "originalCwd": root_info["originalCwd"],
                     "projectRootSource": root_info["projectRootSource"],
                     "projectRootError": root_info["projectRootError"],
@@ -641,6 +766,8 @@ def read_thread(
             "displayTitle": title,
             "originalTitle": row["title"] or "Untitled chat",
             "cwd": root_info["cwd"],
+            "projectPath": root_info["projectPath"],
+            "chatPath": root_info["chatPath"],
             "originalCwd": root_info["originalCwd"],
             "projectRootSource": root_info["projectRootSource"],
             "projectRootError": root_info["projectRootError"],
@@ -773,11 +900,11 @@ def attach_project_paths(
 ) -> list[dict[str, Any]]:
     ordered_projects = sorted(projects, key=lambda project: len(project["path"]), reverse=True)
     for thread in threads:
-        thread["projectPath"] = None
+        thread["catalogProjectPath"] = None
         thread["projectLabel"] = None
         for project in ordered_projects:
             if is_under(thread.get("cwd", ""), project["path"]):
-                thread["projectPath"] = project["path"]
+                thread["catalogProjectPath"] = project["path"]
                 thread["projectLabel"] = project["label"]
                 break
     return threads
@@ -982,8 +1109,13 @@ def project_file_root(cwd: str) -> Path:
     return Path(clean_cwd).resolve()
 
 
-def project_file_roots(cwd: str) -> list[tuple[str, str, Path]]:
+def project_file_roots(cwd: str, chat_path: str = "") -> list[tuple[str, str, Path]]:
     roots: list[tuple[str, str, Path]] = [("thread", "Current chat project", project_file_root(cwd))]
+    clean_chat_path = clean_windows_path(chat_path)
+    if clean_chat_path and Path(clean_chat_path).exists():
+        chat_root = Path(clean_chat_path).resolve()
+        if not any(path_key(str(root)) == path_key(str(chat_root)) for _key, _label, root in roots):
+            roots.append(("chat", "Chat/transcript folder", chat_root))
     project_root = PROJECT_ROOT.resolve()
     if project_root.exists() and not any(path_key(str(root)) == path_key(str(project_root)) for _key, _label, root in roots):
         roots.append(("codex-link", "Codex Link app", project_root))
@@ -1035,8 +1167,8 @@ def project_file_sort_key(item: dict[str, Any]) -> tuple[int, int]:
     return (priority, -int(item.get("modifiedAtMs") or 0))
 
 
-def project_file_list(cwd: str, thread_id: str) -> dict[str, Any]:
-    roots = project_file_roots(cwd)
+def project_file_list(cwd: str, thread_id: str, chat_path: str = "") -> dict[str, Any]:
+    roots = project_file_roots(cwd, chat_path)
     records = []
     for root_key, root_label, root in roots:
         records.extend(collect_project_files(root, thread_id, root_key, root_label))
@@ -1045,6 +1177,8 @@ def project_file_list(cwd: str, thread_id: str) -> dict[str, Any]:
     return {
         "ok": True,
         "cwd": clean_windows_path(cwd),
+        "projectPath": clean_windows_path(cwd),
+        "chatPath": clean_windows_path(chat_path),
         "roots": [
             {"key": root_key, "label": root_label, "path": clean_windows_path(str(root))}
             for root_key, root_label, root in roots
@@ -1055,9 +1189,14 @@ def project_file_list(cwd: str, thread_id: str) -> dict[str, Any]:
     }
 
 
-def project_download_path(cwd: str, rel_path: str, root_key: str = "thread") -> Path:
+def project_download_path(cwd: str, rel_path: str, root_key: str = "thread", chat_path: str = "") -> Path:
     if root_key == "codex-link":
         root = PROJECT_ROOT.resolve()
+    elif root_key == "chat":
+        clean_chat_path = clean_windows_path(chat_path)
+        if not clean_chat_path:
+            raise ValueError("chat folder is not available")
+        root = Path(clean_chat_path).resolve()
     elif root_key in {"", "thread"}:
         root = project_file_root(cwd)
     else:
@@ -1276,10 +1415,12 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
                     self.write_json({"error": "thread not found"}, status=404)
                     return
                 try:
-                    cwd = resolve_thread_project_cwd(self.codex_home, row)
+                    root_info = resolve_thread_project_info(self.codex_home, row)
+                    cwd = str(root_info["projectPath"])
+                    chat_path = str(root_info["chatPath"])
                     rel_path = query.get("path", [""])[0]
                     root_key = query.get("root", ["thread"])[0]
-                    file_path = project_download_path(cwd, rel_path, root_key)
+                    file_path = project_download_path(cwd, rel_path, root_key, chat_path)
                 except ValueError as error:
                     self.write_json({"ok": False, "error": str(error)}, status=400)
                     return
@@ -1294,8 +1435,8 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
                     self.write_json({"error": "thread not found"}, status=404)
                     return
                 try:
-                    cwd = resolve_thread_project_cwd(self.codex_home, row)
-                    self.write_json(project_file_list(cwd, thread_id))
+                    root_info = resolve_thread_project_info(self.codex_home, row)
+                    self.write_json(project_file_list(str(root_info["projectPath"]), thread_id, str(root_info["chatPath"])))
                 except ValueError as error:
                     self.write_json({"ok": False, "error": str(error)}, status=400)
                 except RuntimeError as error:

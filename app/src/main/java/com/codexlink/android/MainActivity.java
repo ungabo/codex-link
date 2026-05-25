@@ -1,5 +1,6 @@
 package com.codexlink.android;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ClipData;
@@ -7,11 +8,13 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -76,10 +79,33 @@ public class MainActivity extends Activity {
     private static final String PREF_CATALOG_CACHE = "catalog_cache";
     private static final String PREF_CATALOG_CACHE_AT = "catalog_cache_at";
     private static final String PREF_CATALOG_CACHE_ENDPOINT = "catalog_cache_endpoint";
+    private static final String PREF_ACTIVE_THREAD_STATE = "active_thread_state";
+    private static final String PREF_LAST_INSTALL_NOTIFICATION_VERSION = "last_install_notification_version";
     private static final String MODE_LOCAL = "local";
     private static final String MODE_WEB = "web";
     private static final String DEFAULT_WEB_ENDPOINT = "https://www.sitesindevelopment.com/codex-link/index.php/link";
     private static final String DEFAULT_WEB_TOKEN = BuildConfig.CODEX_LINK_DEFAULT_WEB_TOKEN;
+    private static final String STATE_THREAD_ID = "thread_id";
+    private static final String STATE_THREAD_TITLE = "thread_title";
+    private static final String STATE_THREAD_CWD = "thread_cwd";
+    private static final String STATE_THREAD_CHAT_PATH = "thread_chat_path";
+    private static final String STATE_THREAD_ACTIVE_TURN_ID = "thread_active_turn_id";
+    private static final String STATE_THREAD_SEARCH = "thread_search";
+    private static final String STATE_THREAD_MESSAGES = "thread_messages";
+    private static final String STATE_DRAFT = "draft";
+    private static final String STATE_SELECTED_IMAGE_URI = "selected_image_uri";
+    private static final String STATE_SELECTED_IMAGE_NAME = "selected_image_name";
+    private static final String STATE_SELECTED_IMAGE_MIME = "selected_image_mime";
+    private static final String STATE_EDITING_IMAGES = "editing_images";
+    private static final String STATE_RANGE_START = "range_start";
+    private static final String STATE_RANGE_END = "range_end";
+    private static final String STATE_TOTAL_MESSAGES = "total_messages";
+    private static final String STATE_SCROLL_Y = "scroll_y";
+    private static final String STATE_HAS_MORE = "has_more";
+    private static final String STATE_THREAD_ACTIVE = "thread_active";
+    private static final String STATE_ACTIONS_EXPANDED = "actions_expanded";
+    private static final String STATE_QUEUE_EXPANDED = "queue_expanded";
+    private static final String STATE_FULL_LOADED = "full_loaded";
 
     private static final int COLOR_BACKGROUND = Color.rgb(246, 244, 239);
     private static final int COLOR_INK = Color.rgb(35, 39, 38);
@@ -92,6 +118,7 @@ public class MainActivity extends Activity {
     private static final int THREAD_PAGE_SIZE = 40;
     private static final int MAX_RESPONSE_BYTES = 1024 * 1024;
     private static final int REQUEST_PICK_IMAGE = 4101;
+    private static final int REQUEST_POST_NOTIFICATIONS = 4102;
     private static final int MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 
     private final ExecutorService networkExecutor = Executors.newSingleThreadExecutor();
@@ -149,6 +176,7 @@ public class MainActivity extends Activity {
     private String currentThreadId;
     private String currentThreadTitle;
     private String currentThreadCwd = "";
+    private String currentThreadChatPath = "";
     private String currentThreadActiveTurnId = "";
     private String currentThreadSearchQuery = "";
     private String currentConnectionMode = MODE_LOCAL;
@@ -170,6 +198,7 @@ public class MainActivity extends Activity {
     private boolean isPollingThread = false;
     private boolean hasLoadedCatalog = false;
     private boolean threadActionsExpanded = false;
+    private boolean queuedTurnsExpanded = false;
     private boolean currentThreadFullLoaded = false;
     private boolean applyingConnectionMode = false;
     private boolean connectionExpanded = false;
@@ -255,6 +284,12 @@ public class MainActivity extends Activity {
 
         setContentView(buildContentView());
         restoreSavedState();
+        requestNotificationPermissionIfNeeded();
+        if (savedInstanceState == null) {
+            restorePersistedThreadState();
+        } else {
+            restoreInstanceState(savedInstanceState);
+        }
         applyIncomingIntent(getIntent(), false);
     }
 
@@ -266,10 +301,75 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onPause() {
+        saveActiveThreadState();
+        super.onPause();
+    }
+
+    @Override
     protected void onDestroy() {
         super.onDestroy();
         stopThreadPoll();
         networkExecutor.shutdownNow();
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        outState.putString(STATE_THREAD_ID, currentThreadId);
+        outState.putString(STATE_THREAD_TITLE, currentThreadTitle);
+        outState.putString(STATE_THREAD_CWD, currentThreadCwd);
+        outState.putString(STATE_THREAD_CHAT_PATH, currentThreadChatPath);
+        outState.putString(STATE_THREAD_ACTIVE_TURN_ID, currentThreadActiveTurnId);
+        outState.putString(STATE_THREAD_SEARCH, currentThreadSearchQuery);
+        outState.putString(STATE_THREAD_MESSAGES, loadedThreadMessages.toString());
+        outState.putString(STATE_DRAFT, threadPromptInput == null ? "" : threadPromptInput.getText().toString());
+        outState.putString(STATE_SELECTED_IMAGE_URI, selectedImageUri == null ? "" : selectedImageUri.toString());
+        outState.putString(STATE_SELECTED_IMAGE_NAME, selectedImageName);
+        outState.putString(STATE_SELECTED_IMAGE_MIME, selectedImageMimeType);
+        outState.putString(STATE_EDITING_IMAGES, editingQueuedImages == null ? "" : editingQueuedImages.toString());
+        outState.putInt(STATE_RANGE_START, loadedRangeStart);
+        outState.putInt(STATE_RANGE_END, loadedRangeEnd);
+        outState.putInt(STATE_TOTAL_MESSAGES, totalThreadMessages);
+        outState.putInt(STATE_SCROLL_Y, rootScrollView == null ? 0 : rootScrollView.getScrollY());
+        outState.putBoolean(STATE_HAS_MORE, hasMoreThreadMessages);
+        outState.putBoolean(STATE_THREAD_ACTIVE, currentThreadActive);
+        outState.putBoolean(STATE_ACTIONS_EXPANDED, threadActionsExpanded);
+        outState.putBoolean(STATE_QUEUE_EXPANDED, queuedTurnsExpanded);
+        outState.putBoolean(STATE_FULL_LOADED, currentThreadFullLoaded);
+    }
+
+    private void requestNotificationPermissionIfNeeded() {
+        NotificationHelper.ensureChannel(this);
+        if (Build.VERSION.SDK_INT < 33) {
+            maybeShowLaunchInstallNotification();
+            return;
+        }
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+            maybeShowLaunchInstallNotification();
+            return;
+        }
+        requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQUEST_POST_NOTIFICATIONS);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQUEST_POST_NOTIFICATIONS) {
+            return;
+        }
+        if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            maybeShowLaunchInstallNotification();
+        }
+    }
+
+    private void maybeShowLaunchInstallNotification() {
+        int lastShown = preferences.getInt(PREF_LAST_INSTALL_NOTIFICATION_VERSION, -1);
+        if (lastShown == BuildConfig.VERSION_CODE) {
+            return;
+        }
+        NotificationHelper.showInstalledNotification(this);
+        preferences.edit().putInt(PREF_LAST_INSTALL_NOTIFICATION_VERSION, BuildConfig.VERSION_CODE).apply();
     }
 
     @Override
@@ -877,6 +977,164 @@ public class MainActivity extends Activity {
         updateHistoryView();
     }
 
+    private void restoreInstanceState(Bundle state) {
+        if (state == null) {
+            return;
+        }
+        currentThreadId = emptyToNull(state.getString(STATE_THREAD_ID, ""));
+        currentThreadTitle = emptyToNull(state.getString(STATE_THREAD_TITLE, ""));
+        currentThreadCwd = state.getString(STATE_THREAD_CWD, "");
+        currentThreadChatPath = state.getString(STATE_THREAD_CHAT_PATH, "");
+        currentThreadActiveTurnId = state.getString(STATE_THREAD_ACTIVE_TURN_ID, "");
+        currentThreadSearchQuery = state.getString(STATE_THREAD_SEARCH, "");
+        loadedRangeStart = state.getInt(STATE_RANGE_START, 0);
+        loadedRangeEnd = state.getInt(STATE_RANGE_END, 0);
+        totalThreadMessages = state.getInt(STATE_TOTAL_MESSAGES, 0);
+        hasMoreThreadMessages = state.getBoolean(STATE_HAS_MORE, false);
+        currentThreadActive = state.getBoolean(STATE_THREAD_ACTIVE, false);
+        threadActionsExpanded = state.getBoolean(STATE_ACTIONS_EXPANDED, false);
+        queuedTurnsExpanded = state.getBoolean(STATE_QUEUE_EXPANDED, false);
+        currentThreadFullLoaded = state.getBoolean(STATE_FULL_LOADED, false);
+
+        String messages = state.getString(STATE_THREAD_MESSAGES, "");
+        if (!messages.isEmpty()) {
+            try {
+                loadedThreadMessages = new JSONArray(messages);
+            } catch (JSONException ignored) {
+                loadedThreadMessages = new JSONArray();
+            }
+        }
+
+        String draft = state.getString(STATE_DRAFT, "");
+        if (threadPromptInput != null && !draft.isEmpty()) {
+            threadPromptInput.setText(draft);
+            threadPromptInput.setSelection(threadPromptInput.length());
+        }
+
+        String imageUri = state.getString(STATE_SELECTED_IMAGE_URI, "");
+        selectedImageUri = imageUri.isEmpty() ? null : Uri.parse(imageUri);
+        selectedImageName = state.getString(STATE_SELECTED_IMAGE_NAME, "");
+        selectedImageMimeType = state.getString(STATE_SELECTED_IMAGE_MIME, "");
+        String editingImages = state.getString(STATE_EDITING_IMAGES, "");
+        if (!editingImages.isEmpty()) {
+            try {
+                editingQueuedImages = new JSONArray(editingImages);
+            } catch (JSONException ignored) {
+                editingQueuedImages = null;
+            }
+        }
+        updateAttachmentPreview();
+
+        if (currentThreadId != null && !currentThreadId.isEmpty()) {
+            ensureQueueLoadedForCurrentThread();
+            setCatalogThreadMode(true);
+            catalogView.setVisibility(View.GONE);
+            renderThreadControls(currentThreadFullLoaded);
+            renderThreadMessages(normalizedEndpoint());
+            renderQueuedTurns();
+            updateThreadComposerState();
+            final int scrollY = state.getInt(STATE_SCROLL_Y, 0);
+            rootScrollView.post(() -> rootScrollView.scrollTo(0, Math.max(0, scrollY)));
+            if (currentThreadActive || !queuedThreadTurns.isEmpty()) {
+                scheduleThreadPoll();
+            } else {
+                maybeRunQueuedTurn();
+            }
+        }
+    }
+
+    private void restorePersistedThreadState() {
+        String raw = preferences.getString(PREF_ACTIVE_THREAD_STATE, "");
+        if (raw == null || raw.isEmpty()) {
+            return;
+        }
+        try {
+            JSONObject state = new JSONObject(raw);
+            currentThreadId = emptyToNull(state.optString(STATE_THREAD_ID, ""));
+            if (currentThreadId == null || currentThreadId.isEmpty()) {
+                return;
+            }
+            currentThreadTitle = emptyToNull(state.optString(STATE_THREAD_TITLE, ""));
+            currentThreadCwd = state.optString(STATE_THREAD_CWD, "");
+            currentThreadChatPath = state.optString(STATE_THREAD_CHAT_PATH, "");
+            currentThreadActiveTurnId = state.optString(STATE_THREAD_ACTIVE_TURN_ID, "");
+            currentThreadSearchQuery = state.optString(STATE_THREAD_SEARCH, "");
+            currentThreadFullLoaded = state.optBoolean(STATE_FULL_LOADED, false);
+            threadActionsExpanded = state.optBoolean(STATE_ACTIONS_EXPANDED, false);
+            queuedTurnsExpanded = state.optBoolean(STATE_QUEUE_EXPANDED, false);
+
+            String draft = state.optString(STATE_DRAFT, "");
+            if (threadPromptInput != null && !draft.isEmpty()) {
+                threadPromptInput.setText(draft);
+                threadPromptInput.setSelection(threadPromptInput.length());
+            }
+
+            String imageUri = state.optString(STATE_SELECTED_IMAGE_URI, "");
+            selectedImageUri = imageUri.isEmpty() ? null : Uri.parse(imageUri);
+            selectedImageName = state.optString(STATE_SELECTED_IMAGE_NAME, "");
+            selectedImageMimeType = state.optString(STATE_SELECTED_IMAGE_MIME, "");
+            String editingImages = state.optString(STATE_EDITING_IMAGES, "");
+            if (!editingImages.isEmpty()) {
+                editingQueuedImages = new JSONArray(editingImages);
+            }
+            updateAttachmentPreview();
+
+            ensureQueueLoadedForCurrentThread();
+            setCatalogThreadMode(true);
+            catalogView.setVisibility(View.GONE);
+            renderThreadControls(currentThreadFullLoaded);
+            renderThreadMessages(normalizedEndpoint());
+            renderQueuedTurns();
+            updateThreadComposerState();
+
+            String endpoint = normalizedEndpoint();
+            if (!endpoint.isEmpty()) {
+                loadThreadPage(currentThreadId, currentThreadTitle, null, currentThreadFullLoaded, false);
+            }
+        } catch (JSONException error) {
+            preferences.edit().remove(PREF_ACTIVE_THREAD_STATE).apply();
+        }
+    }
+
+    private void saveActiveThreadState() {
+        if (preferences == null) {
+            return;
+        }
+        if (currentThreadId == null || currentThreadId.isEmpty()) {
+            preferences.edit().remove(PREF_ACTIVE_THREAD_STATE).apply();
+            return;
+        }
+        try {
+            JSONObject state = new JSONObject()
+                    .put(STATE_THREAD_ID, currentThreadId)
+                    .put(STATE_THREAD_TITLE, currentThreadTitle == null ? "" : currentThreadTitle)
+                    .put(STATE_THREAD_CWD, currentThreadCwd)
+                    .put(STATE_THREAD_CHAT_PATH, currentThreadChatPath)
+                    .put(STATE_THREAD_ACTIVE_TURN_ID, currentThreadActiveTurnId)
+                    .put(STATE_THREAD_SEARCH, currentThreadSearchQuery)
+                    .put(STATE_DRAFT, threadPromptInput == null ? "" : threadPromptInput.getText().toString())
+                    .put(STATE_SELECTED_IMAGE_URI, selectedImageUri == null ? "" : selectedImageUri.toString())
+                    .put(STATE_SELECTED_IMAGE_NAME, selectedImageName)
+                    .put(STATE_SELECTED_IMAGE_MIME, selectedImageMimeType)
+                    .put(STATE_EDITING_IMAGES, editingQueuedImages == null ? "" : editingQueuedImages.toString())
+                    .put(STATE_ACTIONS_EXPANDED, threadActionsExpanded)
+                    .put(STATE_QUEUE_EXPANDED, queuedTurnsExpanded)
+                    .put(STATE_FULL_LOADED, currentThreadFullLoaded);
+            preferences.edit().putString(PREF_ACTIVE_THREAD_STATE, state.toString()).apply();
+        } catch (JSONException ignored) {
+        }
+    }
+
+    private void clearActiveThreadState() {
+        if (preferences != null) {
+            preferences.edit().remove(PREF_ACTIVE_THREAD_STATE).apply();
+        }
+    }
+
+    private String emptyToNull(String value) {
+        return value == null || value.isEmpty() ? null : value;
+    }
+
     private void saveSettings() {
         String endpoint = normalizedEndpoint();
         endpointInput.setText(endpoint);
@@ -1220,8 +1478,12 @@ public class MainActivity extends Activity {
         if (currentThreadId != null && !currentThreadId.isEmpty()) {
             builder.append("\n\nOpen chat: ").append(currentThreadTitle == null || currentThreadTitle.isEmpty() ? currentThreadId : currentThreadTitle);
             builder.append("\nState: ").append(currentThreadActive ? "running" : "idle");
+            builder.append("\nQueue: ").append(processingStatusText());
             if (!currentThreadCwd.isEmpty()) {
                 builder.append("\nProject: ").append(currentThreadCwd);
+            }
+            if (!currentThreadChatPath.isEmpty() && !currentThreadChatPath.equals(currentThreadCwd)) {
+                builder.append("\nChat folder: ").append(currentThreadChatPath);
             }
         }
         if (MODE_WEB.equals(currentConnectionMode)) {
@@ -1462,6 +1724,8 @@ public class MainActivity extends Activity {
                 "updatedAt",
                 "projectLabel",
                 "projectPath",
+                "catalogProjectPath",
+                "chatPath",
                 "cwd",
                 "path",
                 "source",
@@ -1730,7 +1994,8 @@ public class MainActivity extends Activity {
         if (thread != null) {
             currentThreadId = thread.optString("id");
             currentThreadTitle = thread.optString("title", "Untitled chat");
-            currentThreadCwd = thread.optString("cwd", "");
+            currentThreadCwd = firstNonEmpty(thread, "projectPath", "cwd");
+            currentThreadChatPath = firstNonEmpty(thread, "chatPath", "originalCwd");
             currentThreadActive = thread.optBoolean("active");
             currentThreadActiveTurnId = thread.optString("activeTurnId", "");
             ensureQueueLoadedForCurrentThread();
@@ -1753,10 +2018,10 @@ public class MainActivity extends Activity {
 
         renderThreadMessages(endpoint);
         if (currentThreadActive) {
-            setThreadTurnStatus("Codex is running. New messages queue.", false);
+            setThreadTurnStatus(processingStatusText(), false);
         } else if (!isSendingThreadTurn) {
             fastPollRemaining = 0;
-            setThreadTurnStatus("", false);
+            setThreadTurnStatus(processingStatusText(), false);
         }
         renderQueuedTurns();
         if (currentThreadActive || isSendingThreadTurn || !queuedThreadTurns.isEmpty()) {
@@ -1778,11 +2043,17 @@ public class MainActivity extends Activity {
                 } else {
                     restoreThreadScrollAnchor(scrollAnchor, previousScrollY);
                 }
-                if (!currentThreadActive) {
-                    maybeRunQueuedTurn();
-                }
+                maybeRunQueuedTurn();
             }
         });
+    }
+
+    private String firstNonEmpty(JSONObject object, String firstKey, String secondKey) {
+        String first = jsonString(object, firstKey);
+        if (!first.isEmpty()) {
+            return first;
+        }
+        return jsonString(object, secondKey);
     }
 
     private void renderThreadMessages(String endpoint) {
@@ -2024,6 +2295,7 @@ public class MainActivity extends Activity {
                     ? "Queue message"
                     : "Message Codex");
             renderQueuedTurns();
+            setThreadTurnStatus(processingStatusText(), false);
         }
         if (threadActionsExpanded) {
             threadControlsLayout.addView(buildThreadNavigationRow(), matchWrap());
@@ -2822,9 +3094,11 @@ public class MainActivity extends Activity {
     }
 
     private void resetThreadView() {
+        clearActiveThreadState();
         currentThreadId = null;
         currentThreadTitle = null;
         currentThreadCwd = "";
+        currentThreadChatPath = "";
         currentThreadActiveTurnId = "";
         loadedRangeStart = 0;
         loadedRangeEnd = 0;
@@ -2835,6 +3109,7 @@ public class MainActivity extends Activity {
         isSendingThreadTurn = false;
         currentThreadActive = false;
         threadActionsExpanded = false;
+        queuedTurnsExpanded = false;
         currentThreadFullLoaded = false;
         sendingThreadPayload = null;
         loadedThreadMessages = new JSONArray();
@@ -3242,6 +3517,14 @@ public class MainActivity extends Activity {
         sendQueuedTurn(queuedThreadTurns.get(0));
     }
 
+    private void maybeRunQueuedTurnSoon() {
+        if (mainHandler == null) {
+            maybeRunQueuedTurn();
+            return;
+        }
+        mainHandler.postDelayed(this::maybeRunQueuedTurn, 250);
+    }
+
     private void sendQueuedTurn(QueuedTurn turn) {
         if (turn == null || currentThreadId == null || currentThreadId.isEmpty()) {
             return;
@@ -3280,6 +3563,7 @@ public class MainActivity extends Activity {
                     setThreadTurnStatus("Queued message sent.", false);
                     if (threadId.equals(currentThreadId)) {
                         loadThreadPage(threadId, threadTitle, null, false, false);
+                        maybeRunQueuedTurnSoon();
                     }
                 });
             } catch (Exception error) {
@@ -3356,6 +3640,24 @@ public class MainActivity extends Activity {
                 : "Message Codex");
     }
 
+    private String processingStatusText() {
+        if (isSendingThreadTurn) {
+            return queuedThreadTurns.isEmpty() ? "Sending to Codex..." : "Sending queued message...";
+        }
+        if (currentThreadActive) {
+            int count = queuedThreadTurns.size();
+            if (count > 0) {
+                return "Codex is processing. " + count + " queued.";
+            }
+            return "Codex is processing.";
+        }
+        int count = queuedThreadTurns.size();
+        if (count > 0) {
+            return "Idle. " + count + " queued message" + (count == 1 ? "" : "s") + " ready.";
+        }
+        return "Idle.";
+    }
+
     private void renderQueuedTurns() {
         if (queuedTurnListLayout == null) {
             return;
@@ -3367,9 +3669,34 @@ public class MainActivity extends Activity {
         }
 
         queuedTurnListLayout.setVisibility(View.VISIBLE);
-        TextView title = text("Queued messages", 12, COLOR_INK, Typeface.BOLD);
-        title.setPadding(0, 0, 0, dp(4));
-        queuedTurnListLayout.addView(title, matchWrap());
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(0, 0, 0, dp(4));
+
+        TextView title = text(
+                queuedThreadTurns.size() + " queued message" + (queuedThreadTurns.size() == 1 ? "" : "s"),
+                12,
+                COLOR_INK,
+                Typeface.BOLD);
+        header.addView(title, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        Button toggleButton = toolbarButton(queuedTurnsExpanded ? "Hide" : "Show", Color.WHITE, COLOR_PRIMARY);
+        toggleButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
+        toggleButton.setOnClickListener(view -> {
+            queuedTurnsExpanded = !queuedTurnsExpanded;
+            renderQueuedTurns();
+        });
+        header.addView(toggleButton, new LinearLayout.LayoutParams(dp(66), dp(32)));
+        queuedTurnListLayout.addView(header, matchWrap());
+
+        if (!queuedTurnsExpanded) {
+            TextView preview = text(queueSummary(queuedThreadTurns.get(0)), 11, COLOR_MUTED, Typeface.NORMAL);
+            preview.setSingleLine(true);
+            preview.setEllipsize(TextUtils.TruncateAt.END);
+            queuedTurnListLayout.addView(preview, matchWrap());
+            return;
+        }
 
         for (QueuedTurn turn : new ArrayList<>(queuedThreadTurns)) {
             LinearLayout item = new LinearLayout(this);
@@ -3512,6 +3839,7 @@ public class MainActivity extends Activity {
             Log.w(TAG, "Could not load queue for thread " + threadId, error);
         }
         renderQueuedTurns();
+        maybeRunQueuedTurnSoon();
     }
 
     private void persistQueue() {
@@ -3742,6 +4070,7 @@ public class MainActivity extends Activity {
                         return;
                     }
                     renderThreadPage(endpoint, response, false, false);
+                    maybeRunQueuedTurnSoon();
                 });
             } catch (Exception error) {
                 mainHandler.post(() -> {

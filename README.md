@@ -35,12 +35,16 @@ The native Android prototype is now useful as a private phone companion MVP:
 - merges consecutive messages from the same role into paragraph-separated blocks
 - replaces image references with lazy placeholders
 - detects active/running chats and queues phone messages instead of interleaving turns
+- shows explicit idle/processing/sending/queued status in the open chat composer
+- pumps queued messages as soon as the opened chat refreshes back to idle
+- keeps queued messages collapsed by default so they do not consume the chat view
 - lets queued phone messages be edited or deleted before they run
 - exposes queued messages across chats so a hidden queue is not stranded inside one thread
 - polls an active opened chat and refreshes new transcript output at the bottom
 - attaches phone images to chat submissions
 - previews or clears a selected image before sending
 - sends follow-up prompts from the phone through `codex app-server` with workspace-write access limited to the mapped project root
+- tracks the Codex chat/transcript folder separately from the writable project folder and can infer real projects from transcript-looking folders when they contain project markers
 - persists queued phone messages per chat across app restarts
 - can start a new Codex chat in the currently opened chat's project folder
 - exposes phone controls for Git status, diff preview, checkpoint, and revert to last checkpoint
@@ -49,6 +53,9 @@ The native Android prototype is now useful as a private phone companion MVP:
 - attempts to interrupt an active turn when the app-server exposes the active turn id
 - opens directly into a denser chat list, keeps connection settings collapsed, and keeps the composer visible above the keyboard
 - collapses the expanded Actions panel when the composer receives focus, so typing does not leave a huge toolbar over the chat
+- preserves the open chat, draft composer text, attachment state, and scroll position through screen rotation
+- restores the last open chat and draft after app switching or activity recreation
+- requests Android notification permission and shows a phone notification after the APK is replaced
 - anchors the visible transcript while you read; active output only auto-follows when the bottom of the chat is already visible
 - includes `qa\android_smoke_test.ps1` for repeatable install/launch/catalog/thread/action/keyboard checks
 
