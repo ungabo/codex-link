@@ -26,6 +26,8 @@ The native Android prototype is now useful as a private phone companion MVP:
 - web endpoint: `https://www.sitesindevelopment.com/codex-link/index.php/link`
 - lists Codex desktop chats/projects from local Codex state
 - opens any listed chat, including this current chat
+- shows an in-app Status dialog with app version, Local/Web mode, endpoint, host health, catalog cache, current chat, and queued-message counts
+- shows a Queue overview for phone messages queued across chats
 - loads the newest transcript window first instead of the whole chat
 - loads older messages with `Older` and can load a full transcript with `Full`
 - has compact fixed `Chats`, `Refresh`, `Files`, and `Actions` controls, with secondary chat actions inside the accordion
@@ -34,17 +36,21 @@ The native Android prototype is now useful as a private phone companion MVP:
 - replaces image references with lazy placeholders
 - detects active/running chats and queues phone messages instead of interleaving turns
 - lets queued phone messages be edited or deleted before they run
+- exposes queued messages across chats so a hidden queue is not stranded inside one thread
 - polls an active opened chat and refreshes new transcript output at the bottom
 - attaches phone images to chat submissions
+- previews or clears a selected image before sending
 - sends follow-up prompts from the phone through `codex app-server` with workspace-write access limited to the mapped project root
 - persists queued phone messages per chat across app restarts
 - can start a new Codex chat in the currently opened chat's project folder
 - exposes phone controls for Git status, diff preview, checkpoint, and revert to last checkpoint
+- confirms Stop, Checkpoint, and Revert actions with the affected chat/project before sending them
 - exposes a project file picker for recently changed/generated files, including direct APK downloads and in-app text previews
 - attempts to interrupt an active turn when the app-server exposes the active turn id
 - opens directly into a denser chat list, keeps connection settings collapsed, and keeps the composer visible above the keyboard
 - collapses the expanded Actions panel when the composer receives focus, so typing does not leave a huge toolbar over the chat
 - anchors the visible transcript while you read; active output only auto-follows when the bottom of the chat is already visible
+- includes `qa\android_smoke_test.ps1` for repeatable install/launch/catalog/thread/action/keyboard checks
 
 ## APK Download
 
@@ -149,7 +155,10 @@ SM_A546U
 Verified on the phone:
 
 - local Windows mode refreshes the live desktop catalog through `http://10.0.0.211:18765/link`
+- Web Link mode was verified through the relay while the Windows tunnel was running
 - chats open and mirror recent transcript content
+- Status shows app version, endpoint, host health, and queue counts
+- Queue shows whether phone messages are waiting across chats
 - fixed jump controls remain available as floating up/down buttons
 - `Older`, `Top`, `Full`, and compact chat search are exposed inside the Actions accordion
 - the fixed top composer stays visible above the keyboard
@@ -157,8 +166,12 @@ Verified on the phone:
 - the composer sends to the current thread and refreshes with the Codex reply
 - active chats show `Queue` instead of `Send`
 - queued messages render with `Edit` and `Delete`; delete was verified on-device
-- `Host` reports the bridge online
+- image sharing into the app attaches an image and exposes `View`/`Clear`
+- project file listing works, and `README.md` was opened in the in-app preview overlay
+- Stop opens a confirmation dialog before interrupting the open chat
+- `Status` reports the bridge online
 - scroll anchoring keeps the same visible message at the same bounds through a poll interval while reading away from the bottom
+- automated smoke test passed with `qa\android_smoke_test.ps1 -Serial RZCX625807M -SkipInstall`
 
 Latest successful phone-originated smoke reply:
 

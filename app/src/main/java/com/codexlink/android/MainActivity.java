@@ -140,8 +140,10 @@ public class MainActivity extends Activity {
     private Button threadSendButton;
     private Button loadCatalogButton;
     private Button attachImageButton;
+    private Button previewAttachmentButton;
     private Button connectionToggleButton;
     private Button hostStatusButton;
+    private Button queueOverviewButton;
     private Button jumpUpButton;
     private Button jumpDownButton;
     private String currentThreadId;
@@ -210,6 +212,24 @@ public class MainActivity extends Activity {
         ScrollAnchor(int messageIndex, int offset) {
             this.messageIndex = messageIndex;
             this.offset = offset;
+        }
+    }
+
+    private static class QueueInfo {
+        final String threadId;
+        final String title;
+        final int count;
+        final long oldestAt;
+        final String firstPrompt;
+        final int imageCount;
+
+        QueueInfo(String threadId, String title, int count, long oldestAt, String firstPrompt, int imageCount) {
+            this.threadId = threadId;
+            this.title = title;
+            this.count = count;
+            this.oldestAt = oldestAt;
+            this.firstPrompt = firstPrompt;
+            this.imageCount = imageCount;
         }
     }
 
@@ -502,10 +522,17 @@ public class MainActivity extends Activity {
         attachmentStatusView.setSingleLine(true);
         attachmentPreviewLayout.addView(attachmentStatusView, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
-        Button clearAttachmentButton = toolbarButton("X", Color.WHITE, COLOR_MUTED);
+        previewAttachmentButton = toolbarButton("View", Color.WHITE, COLOR_PRIMARY);
+        previewAttachmentButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
+        previewAttachmentButton.setOnClickListener(view -> openSelectedImagePreview());
+        attachmentPreviewLayout.addView(previewAttachmentButton, new LinearLayout.LayoutParams(dp(58), dp(34)));
+
+        attachmentPreviewLayout.addView(spacer(dp(4)));
+
+        Button clearAttachmentButton = toolbarButton("Clear", Color.WHITE, COLOR_MUTED);
         clearAttachmentButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
         clearAttachmentButton.setOnClickListener(view -> clearSelectedImage());
-        attachmentPreviewLayout.addView(clearAttachmentButton, new LinearLayout.LayoutParams(dp(42), dp(34)));
+        attachmentPreviewLayout.addView(clearAttachmentButton, new LinearLayout.LayoutParams(dp(62), dp(34)));
         composer.addView(attachmentPreviewLayout, matchWrap());
 
         threadTurnStatusView = text("", 12, COLOR_MUTED, Typeface.NORMAL);
@@ -589,17 +616,25 @@ public class MainActivity extends Activity {
         hostRow.setGravity(Gravity.CENTER);
 
         loadCatalogButton = toolbarButton("Refresh", COLOR_GOLD, COLOR_INK);
-        loadCatalogButton.setTextSize(13);
+        loadCatalogButton.setTextSize(12);
         loadCatalogButton.setOnClickListener(view -> loadCatalog());
         hostRow.addView(loadCatalogButton, new LinearLayout.LayoutParams(0, dp(40), 1f));
 
-        hostRow.addView(spacer(dp(10)));
+        hostRow.addView(spacer(dp(6)));
 
-        hostStatusButton = toolbarButton("Host", Color.WHITE, COLOR_PRIMARY);
-        hostStatusButton.setTextSize(13);
+        hostStatusButton = toolbarButton("Status", Color.WHITE, COLOR_PRIMARY);
+        hostStatusButton.setTextSize(12);
         hostStatusButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
-        hostStatusButton.setOnClickListener(view -> checkHostStatus());
+        hostStatusButton.setOnClickListener(view -> showHostStatusDialog());
         hostRow.addView(hostStatusButton, new LinearLayout.LayoutParams(0, dp(40), 1f));
+
+        hostRow.addView(spacer(dp(6)));
+
+        queueOverviewButton = toolbarButton("Queue", Color.WHITE, COLOR_PRIMARY);
+        queueOverviewButton.setTextSize(12);
+        queueOverviewButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
+        queueOverviewButton.setOnClickListener(view -> showAllQueuesDialog());
+        hostRow.addView(queueOverviewButton, new LinearLayout.LayoutParams(0, dp(40), 1f));
 
         section.addView(hostRow, matchWrap());
 
@@ -1096,6 +1131,134 @@ public class MainActivity extends Activity {
         return new URL(url.getProtocol(), url.getHost(), url.getPort(), healthPath).toString();
     }
 
+    private void showHostStatusDialog() {
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Codex Link status")
+                .setMessage(buildHostStatusMessage(null, "Checking host..."))
+                .setPositiveButton("Refresh", null)
+                .setNeutralButton("Queues", (view, which) -> showAllQueuesDialog())
+                .setNegativeButton("Close", null)
+                .create();
+        dialog.setOnShowListener(view -> {
+            Button refreshButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            if (refreshButton != null) {
+                refreshButton.setOnClickListener(button -> refreshHostStatusDialog(dialog));
+            }
+            refreshHostStatusDialog(dialog);
+        });
+        dialog.show();
+    }
+
+    private void refreshHostStatusDialog(AlertDialog dialog) {
+        String endpoint = normalizedEndpoint();
+        String token = tokenInput.getText().toString().trim();
+        if (endpoint.isEmpty()) {
+            dialog.setMessage(buildHostStatusMessage(null, "Endpoint is empty."));
+            return;
+        }
+
+        saveSettings();
+        dialog.setMessage(buildHostStatusMessage(null, "Checking host..."));
+        networkExecutor.execute(() -> {
+            try {
+                String healthEndpoint = healthEndpointFor(endpoint);
+                String body = getCatalog(healthEndpoint, token);
+                JSONObject health = new JSONObject(body);
+                mainHandler.post(() -> {
+                    if (dialog.isShowing()) {
+                        dialog.setMessage(buildHostStatusMessage(health, null));
+                    }
+                    setCatalogStatus(health.optBoolean("ok") ? "Host online." : "Host replied but did not report ok.", !health.optBoolean("ok"));
+                });
+            } catch (Exception error) {
+                String message = error.getMessage() == null ? "Host check failed." : error.getMessage();
+                mainHandler.post(() -> {
+                    if (dialog.isShowing()) {
+                        dialog.setMessage(buildHostStatusMessage(null, message));
+                    }
+                    setCatalogStatus(message, true);
+                });
+            }
+        });
+    }
+
+    private String buildHostStatusMessage(JSONObject health, String statusMessage) {
+        String endpoint = normalizedEndpoint();
+        String token = tokenInput == null ? "" : tokenInput.getText().toString().trim();
+        StringBuilder builder = new StringBuilder();
+        builder.append("App: ").append(BuildConfig.VERSION_NAME).append(" (").append(BuildConfig.VERSION_CODE).append(")");
+        builder.append("\nMode: ").append(MODE_WEB.equals(currentConnectionMode) ? "Web Link" : "Local Windows");
+        builder.append("\nEndpoint: ").append(endpoint.isEmpty() ? "(empty)" : endpoint);
+        builder.append("\nToken: ").append(token.isEmpty() ? "not set" : "set");
+
+        if (health != null) {
+            builder.append("\n\nHost: ").append(health.optBoolean("ok") ? "online" : "not ok");
+            builder.append("\nSource: ").append(health.optString("source", "(unknown)"));
+            String generatedAt = health.optString("generatedAt", "");
+            if (!generatedAt.isEmpty()) {
+                builder.append("\nChecked: ").append(generatedAt);
+            }
+        } else {
+            builder.append("\n\nHost: ").append(statusMessage == null || statusMessage.isEmpty() ? "not checked" : statusMessage);
+        }
+
+        builder.append("\n\nCatalog: ").append(catalogCacheSummary());
+        ArrayList<QueueInfo> queues = allQueueInfo();
+        int queuedMessages = 0;
+        for (QueueInfo info : queues) {
+            queuedMessages += info.count;
+        }
+        builder.append("\nQueues: ").append(queuedMessages).append(" message");
+        if (queuedMessages != 1) {
+            builder.append("s");
+        }
+        builder.append(" in ").append(queues.size()).append(" chat");
+        if (queues.size() != 1) {
+            builder.append("s");
+        }
+
+        if (currentThreadId != null && !currentThreadId.isEmpty()) {
+            builder.append("\n\nOpen chat: ").append(currentThreadTitle == null || currentThreadTitle.isEmpty() ? currentThreadId : currentThreadTitle);
+            builder.append("\nState: ").append(currentThreadActive ? "running" : "idle");
+            if (!currentThreadCwd.isEmpty()) {
+                builder.append("\nProject: ").append(currentThreadCwd);
+            }
+        }
+        if (MODE_WEB.equals(currentConnectionMode)) {
+            builder.append("\n\nWeb Link needs the Windows tunnel running. If this shows a timeout or relay error, start the Codex Link Web Tunnel shortcut.");
+        }
+        return builder.toString();
+    }
+
+    private String catalogCacheSummary() {
+        long cachedAt = preferences.getLong(PREF_CATALOG_CACHE_AT, 0L);
+        String cachedEndpoint = preferences.getString(PREF_CATALOG_CACHE_ENDPOINT, "");
+        String raw = preferences.getString(PREF_CATALOG_CACHE, "");
+        int chats = loadedCatalogChatCount;
+        try {
+            JSONObject cached = raw == null || raw.isEmpty() ? null : new JSONObject(raw);
+            if (cached != null) {
+                JSONArray cachedChats = cached.optJSONArray("chats");
+                if (cachedChats != null) {
+                    chats = cachedChats.length();
+                }
+            }
+        } catch (JSONException ignored) {
+        }
+        StringBuilder builder = new StringBuilder();
+        builder.append(chats).append(" chat");
+        if (chats != 1) {
+            builder.append("s");
+        }
+        if (cachedAt > 0) {
+            builder.append(", cached ").append(timeFormat.format(new Date(cachedAt)));
+        }
+        if (cachedEndpoint != null && !cachedEndpoint.isEmpty()) {
+            builder.append("\nCached endpoint: ").append(cachedEndpoint);
+        }
+        return builder.toString();
+    }
+
     private void checkHostStatus() {
         String endpoint = normalizedEndpoint();
         String token = tokenInput.getText().toString().trim();
@@ -1189,6 +1352,15 @@ public class MainActivity extends Activity {
     }
 
     private void throwHttpError(String label, HttpResult result) throws IOException {
+        if (result.status == 401) {
+            throw new IOException("Not authorized. Check the Web Link token, or clear the token for a local bridge that does not require one.");
+        }
+        if (result.status == 404) {
+            throw new IOException(label + " was not found. Check that the endpoint ends with /link and that the bridge or relay is running.");
+        }
+        if (result.status == 502 || result.status == 503 || result.status == 504) {
+            throw new IOException("Web Link relay could not reach the Windows tunnel. Start the Codex Link Web Tunnel shortcut and try again.");
+        }
         if (result.body.isEmpty()) {
             throw new IOException(label + " replied with HTTP " + result.status + ".");
         }
@@ -1326,15 +1498,15 @@ public class MainActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.VERTICAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setMinimumHeight(dp(64));
-        row.setPadding(dp(12), dp(9), dp(12), dp(9));
+        row.setMinimumHeight(dp(52));
+        row.setPadding(dp(10), dp(7), dp(10), dp(7));
         row.setEnabled(!threadId.isEmpty());
         row.setClickable(!threadId.isEmpty());
         row.setFocusable(!threadId.isEmpty());
         row.setBackground(outlineDrawable(Color.rgb(252, 251, 248), active ? COLOR_PRIMARY : COLOR_BORDER, dp(8)));
         row.setOnClickListener(view -> loadThread(threadId, title));
 
-        TextView titleView = text(title == null || title.isEmpty() ? "Untitled chat" : title, 15, active ? COLOR_PRIMARY : COLOR_INK, Typeface.NORMAL);
+        TextView titleView = text(title == null || title.isEmpty() ? "Untitled chat" : title, 14, active ? COLOR_PRIMARY : COLOR_INK, Typeface.NORMAL);
         titleView.setSingleLine(false);
         titleView.setMaxLines(2);
         titleView.setLineSpacing(dp(1), 1.0f);
@@ -1342,15 +1514,15 @@ public class MainActivity extends Activity {
 
         String meta = compactChatMeta(updatedAt, projectLabel, pinned, active);
         if (!meta.isEmpty()) {
-            TextView metaView = text(meta, 12, COLOR_MUTED, Typeface.NORMAL);
+            TextView metaView = text(meta, 11, COLOR_MUTED, Typeface.NORMAL);
             metaView.setSingleLine(true);
             metaView.setEllipsize(TextUtils.TruncateAt.END);
-            metaView.setPadding(0, dp(4), 0, 0);
+            metaView.setPadding(0, dp(2), 0, 0);
             row.addView(metaView, matchWrap());
         }
 
         chatListLayout.addView(row, matchWrap());
-        chatListLayout.addView(spacer(dp(6)));
+        chatListLayout.addView(spacer(dp(4)));
     }
 
     private String compactChatMeta(String updatedAt, String projectLabel, boolean pinned, boolean active) {
@@ -1943,7 +2115,7 @@ public class MainActivity extends Activity {
         Button stopButton = toolbarButton("Stop", Color.WHITE, canStop ? COLOR_ACCENT : COLOR_MUTED);
         stopButton.setEnabled(canStop);
         stopButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
-        stopButton.setOnClickListener(view -> interruptCurrentThread());
+        stopButton.setOnClickListener(view -> confirmStopCurrentThread());
         row.addView(stopButton, weightedToolbarButton());
 
         row.addView(spacer(dp(3)));
@@ -1971,7 +2143,7 @@ public class MainActivity extends Activity {
         Button checkpointButton = toolbarButton("Checkpoint", Color.WHITE, currentThreadCwd.isEmpty() ? COLOR_MUTED : COLOR_PRIMARY);
         checkpointButton.setEnabled(!currentThreadCwd.isEmpty());
         checkpointButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
-        checkpointButton.setOnClickListener(view -> createProjectCheckpoint());
+        checkpointButton.setOnClickListener(view -> confirmAndCreateProjectCheckpoint());
         row.addView(checkpointButton, new LinearLayout.LayoutParams(0, dp(34), 1.4f));
 
         row.addView(spacer(dp(3)));
@@ -2081,6 +2253,25 @@ public class MainActivity extends Activity {
                 mainHandler.post(() -> setThreadTurnStatus(error.getMessage() == null ? "Could not start chat." : error.getMessage(), true));
             }
         });
+    }
+
+    private void confirmStopCurrentThread() {
+        if (currentThreadId == null || currentThreadId.isEmpty()) {
+            setThreadTurnStatus("Open a chat first.", true);
+            return;
+        }
+        if (currentThreadActiveTurnId == null || currentThreadActiveTurnId.isEmpty()) {
+            setThreadTurnStatus("No active turn id is available for this chat.", true);
+            return;
+        }
+
+        String title = currentThreadTitle == null || currentThreadTitle.isEmpty() ? currentThreadId : currentThreadTitle;
+        new AlertDialog.Builder(this)
+                .setTitle("Stop this chat?")
+                .setMessage("This sends an interrupt only to the open chat.\n\nChat: " + title + "\nTurn: " + currentThreadActiveTurnId)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Stop", (dialog, which) -> interruptCurrentThread())
+                .show();
     }
 
     private void interruptCurrentThread() {
@@ -2296,6 +2487,20 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void confirmAndCreateProjectCheckpoint() {
+        if (currentThreadId == null || currentThreadId.isEmpty()) {
+            setThreadTurnStatus("Open a chat first.", true);
+            return;
+        }
+        String title = currentThreadTitle == null || currentThreadTitle.isEmpty() ? currentThreadId : currentThreadTitle;
+        new AlertDialog.Builder(this)
+                .setTitle("Create checkpoint?")
+                .setMessage("This records the current Git state before more phone-driven work.\n\nChat: " + title + "\nProject: " + (currentThreadCwd.isEmpty() ? "(unknown)" : currentThreadCwd))
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Checkpoint", (dialog, which) -> createProjectCheckpoint())
+                .show();
+    }
+
     private void createProjectCheckpoint() {
         String endpoint = normalizedEndpoint();
         String token = tokenInput.getText().toString().trim();
@@ -2322,11 +2527,15 @@ public class MainActivity extends Activity {
     }
 
     private void confirmAndRevertProject() {
+        String title = currentThreadTitle == null || currentThreadTitle.isEmpty() ? currentThreadId : currentThreadTitle;
         new AlertDialog.Builder(this)
                 .setTitle("Revert project?")
-                .setMessage("This resets tracked files to the last Codex Link checkpoint for this project. Untracked files are left alone.")
+                .setMessage("This resets tracked files to the last Codex Link checkpoint for the open chat only. Untracked files are left alone.\n\nChat: "
+                        + title
+                        + "\nProject: "
+                        + (currentThreadCwd.isEmpty() ? "(unknown)" : currentThreadCwd))
                 .setNegativeButton("Cancel", null)
-                .setPositiveButton("Revert", (dialog, which) -> revertProjectToCheckpoint())
+                .setPositiveButton("Revert tracked files", (dialog, which) -> revertProjectToCheckpoint())
                 .show();
     }
 
@@ -2673,6 +2882,9 @@ public class MainActivity extends Activity {
         if (hostStatusButton != null) {
             hostStatusButton.setVisibility(supportingVisibility);
         }
+        if (queueOverviewButton != null) {
+            queueOverviewButton.setVisibility(supportingVisibility);
+        }
         if (catalogStatusView != null) {
             catalogStatusView.setVisibility(supportingVisibility);
         }
@@ -2959,7 +3171,7 @@ public class MainActivity extends Activity {
         JSONObject payload = new JSONObject()
                 .put("prompt", prompt)
                 .put("sentAt", System.currentTimeMillis())
-                .put("appVersion", "0.1.0");
+                .put("appVersion", BuildConfig.VERSION_NAME);
 
         JSONArray images = new JSONArray();
         if (preservedImages != null) {
@@ -3140,8 +3352,8 @@ public class MainActivity extends Activity {
         threadSendButton.setEnabled(true);
         threadSendButton.setText(queueMode ? "Queue" : "Send");
         threadPromptInput.setHint(currentThreadActive
-                ? "Queue a message for this chat"
-                : "Message Codex in this chat");
+                ? "Queue message"
+                : "Message Codex");
     }
 
     private void renderQueuedTurns() {
@@ -3348,6 +3560,123 @@ public class MainActivity extends Activity {
             return "thread";
         }
         return safe.length() > 120 ? safe.substring(0, 120) : safe;
+    }
+
+    private void showAllQueuesDialog() {
+        ArrayList<QueueInfo> queues = allQueueInfo();
+        if (queues.isEmpty()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("Queued messages")
+                    .setMessage("No phone messages are queued.")
+                    .setPositiveButton("OK", null)
+                    .show();
+            return;
+        }
+
+        ArrayList<String> labels = new ArrayList<>();
+        for (QueueInfo info : queues) {
+            labels.add(formatQueueInfoLabel(info));
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Queued messages")
+                .setItems(labels.toArray(new String[0]), (dialog, which) -> {
+                    QueueInfo info = queues.get(which);
+                    loadThread(info.threadId, info.title);
+                })
+                .setNegativeButton("Close", null)
+                .show();
+    }
+
+    private ArrayList<QueueInfo> allQueueInfo() {
+        ArrayList<QueueInfo> queues = new ArrayList<>();
+        File dir = new File(getFilesDir(), "queues");
+        File[] files = dir.listFiles((file, name) -> name.endsWith(".json"));
+        if (files == null) {
+            return queues;
+        }
+        for (File file : files) {
+            try (InputStream input = new FileInputStream(file);
+                 ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[4096];
+                int read;
+                while ((read = input.read(buffer)) != -1) {
+                    output.write(buffer, 0, read);
+                }
+                JSONArray array = new JSONArray(output.toString(StandardCharsets.UTF_8.name()));
+                if (array.length() == 0) {
+                    continue;
+                }
+                String threadId = file.getName().substring(0, file.getName().length() - ".json".length());
+                long oldestAt = Long.MAX_VALUE;
+                String firstPrompt = "";
+                int imageCount = 0;
+                for (int index = 0; index < array.length(); index++) {
+                    JSONObject item = array.optJSONObject(index);
+                    if (item == null) {
+                        continue;
+                    }
+                    long createdAt = item.optLong("createdAt", 0L);
+                    if (createdAt > 0 && createdAt < oldestAt) {
+                        oldestAt = createdAt;
+                    }
+                    JSONObject payload = item.optJSONObject("payload");
+                    if (payload != null) {
+                        if (firstPrompt.isEmpty()) {
+                            firstPrompt = payload.optString("prompt", "");
+                        }
+                        JSONArray images = payload.optJSONArray("images");
+                        imageCount += images == null ? 0 : images.length();
+                    }
+                }
+                queues.add(new QueueInfo(
+                        threadId,
+                        titleForThreadId(threadId),
+                        array.length(),
+                        oldestAt == Long.MAX_VALUE ? 0L : oldestAt,
+                        firstPrompt,
+                        imageCount));
+            } catch (Exception error) {
+                Log.w(TAG, "Could not read queue file " + file.getName(), error);
+            }
+        }
+        Collections.sort(queues, (left, right) -> Long.compare(left.oldestAt, right.oldestAt));
+        return queues;
+    }
+
+    private String formatQueueInfoLabel(QueueInfo info) {
+        StringBuilder builder = new StringBuilder();
+        builder.append(info.title == null || info.title.isEmpty() ? info.threadId : info.title);
+        builder.append("\n").append(info.count).append(info.count == 1 ? " message" : " messages");
+        if (info.oldestAt > 0) {
+            builder.append(" - oldest ").append(timeFormat.format(new Date(info.oldestAt)));
+        }
+        if (info.imageCount > 0) {
+            builder.append(" - ").append(info.imageCount).append(info.imageCount == 1 ? " image" : " images");
+        }
+        if (info.firstPrompt != null && !info.firstPrompt.trim().isEmpty()) {
+            String preview = info.firstPrompt.trim();
+            if (preview.length() > 90) {
+                preview = preview.substring(0, 87) + "...";
+            }
+            builder.append("\n").append(preview);
+        }
+        return builder.toString();
+    }
+
+    private String titleForThreadId(String threadId) {
+        if (threadId == null || threadId.isEmpty()) {
+            return "Queued chat";
+        }
+        if (threadId.equals(currentThreadId) && currentThreadTitle != null && !currentThreadTitle.isEmpty()) {
+            return currentThreadTitle;
+        }
+        for (int index = 0; index < loadedCatalogChats.length(); index++) {
+            JSONObject chat = loadedCatalogChats.optJSONObject(index);
+            if (chat != null && threadId.equals(chat.optString("id", ""))) {
+                return chatDisplayTitle(chat);
+            }
+        }
+        return threadId;
     }
 
     private JSONArray copyJsonArray(JSONArray value) {
@@ -3582,15 +3911,42 @@ public class MainActivity extends Activity {
         if (selectedImageUri == null && preservedImageCount == 0) {
             attachmentPreviewLayout.setVisibility(View.GONE);
             attachmentStatusView.setText("");
+            if (previewAttachmentButton != null) {
+                previewAttachmentButton.setVisibility(View.GONE);
+                previewAttachmentButton.setEnabled(false);
+            }
             return;
         }
         attachmentPreviewLayout.setVisibility(View.VISIBLE);
         if (selectedImageUri != null) {
             attachmentStatusView.setText("Attached image: " + (selectedImageName.isEmpty() ? "image" : selectedImageName));
+            if (previewAttachmentButton != null) {
+                previewAttachmentButton.setVisibility(View.VISIBLE);
+                previewAttachmentButton.setEnabled(true);
+            }
         } else {
             attachmentStatusView.setText(preservedImageCount == 1
                     ? "Attached queued image preserved"
                     : preservedImageCount + " queued images preserved");
+            if (previewAttachmentButton != null) {
+                previewAttachmentButton.setVisibility(View.GONE);
+                previewAttachmentButton.setEnabled(false);
+            }
+        }
+    }
+
+    private void openSelectedImagePreview() {
+        if (selectedImageUri == null) {
+            setThreadTurnStatus("No selected image to preview.", true);
+            return;
+        }
+        try {
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            intent.setDataAndType(selectedImageUri, selectedImageMimeType == null || selectedImageMimeType.isEmpty() ? "image/*" : selectedImageMimeType);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(intent);
+        } catch (Exception error) {
+            setThreadTurnStatus("Could not open selected image.", true);
         }
     }
 
