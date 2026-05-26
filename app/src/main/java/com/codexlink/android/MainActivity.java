@@ -2097,6 +2097,7 @@ public class MainActivity extends Activity {
             currentThreadStaleReason = thread.optString("staleReason", "");
             currentThreadActiveTurnId = thread.optString("activeTurnId", "");
             ensureQueueLoadedForCurrentThread();
+            loadThreadRequestStatus();
         }
 
         loadedRangeStart = response.optInt("rangeStart", 0);
@@ -2122,6 +2123,7 @@ public class MainActivity extends Activity {
             setThreadTurnStatus(processingStatusText(), false);
         }
         renderQueuedTurns();
+        syncRequestStatusWithThreadState();
         if (currentThreadActive || isSendingThreadTurn || !queuedThreadTurns.isEmpty()) {
             scheduleThreadPoll();
         } else {
@@ -3243,6 +3245,7 @@ public class MainActivity extends Activity {
         currentThreadSearchMatch = -1;
         threadSearchMatches.clear();
         unloadThreadQueue();
+        clearVisibleRequestStatus();
         stopThreadPoll();
         hideThreadResponseOverlay();
         setThreadTurnStatus("", false);
@@ -3525,15 +3528,32 @@ public class MainActivity extends Activity {
 
     private void queuePreparedThreadPayload(JSONObject payload, String statusMessage, boolean isError) {
         ensureQueueLoadedForCurrentThread();
+        QueuedTurn queuedTurn = queuedTurnForPayload(payload);
         if (!payloadIsQueued(payload)) {
-            queuedThreadTurns.add(new QueuedTurn(payload));
+            queuedTurn = new QueuedTurn(payload);
+            queuedThreadTurns.add(queuedTurn);
             persistQueue();
         }
+        rememberThreadRequestStatus(
+                "Queued",
+                payload,
+                "Stored on phone. Queue worker will send it.",
+                isError,
+                queuedTurn == null ? "" : queuedTurn.id);
         renderQueuedTurns();
         rerenderCurrentThreadMessages();
         scrollThreadToBottom(true);
         updateThreadComposerState();
         setThreadTurnStatus(statusMessage, isError);
+    }
+
+    private QueuedTurn queuedTurnForPayload(JSONObject payload) {
+        for (QueuedTurn turn : queuedThreadTurns) {
+            if (samePayload(turn.payload, payload)) {
+                return turn;
+            }
+        }
+        return null;
     }
 
     private JSONObject buildThreadTurnPayload(
@@ -3653,12 +3673,18 @@ public class MainActivity extends Activity {
         String threadId = intent == null ? "" : intent.getStringExtra(CodexQueueService.EXTRA_THREAD_ID);
         String status = intent == null ? "" : intent.getStringExtra(CodexQueueService.EXTRA_STATUS);
         boolean isError = intent != null && intent.getBooleanExtra(CodexQueueService.EXTRA_ERROR, false);
+        String requestStage = intent == null ? "" : intent.getStringExtra(CodexQueueService.EXTRA_REQUEST_STAGE);
+        String requestSummary = intent == null ? "" : intent.getStringExtra(CodexQueueService.EXTRA_REQUEST_SUMMARY);
+        String requestId = intent == null ? "" : intent.getStringExtra(CodexQueueService.EXTRA_REQUEST_ID);
         if (currentThreadId != null && !currentThreadId.isEmpty()) {
             reloadCurrentThreadQueueFromDisk();
             if (status != null && !status.isEmpty() && (threadId == null || threadId.isEmpty() || currentThreadId.equals(threadId))) {
                 setThreadTurnStatus(status, isError);
             } else {
                 setThreadTurnStatus(processingStatusText(), false);
+            }
+            if (requestStage != null && !requestStage.isEmpty() && currentThreadId.equals(threadId)) {
+                updateRequestStatusPill(requestStage, requestSummary, status, isError, requestId, true);
             }
             if (threadId != null && threadId.equals(currentThreadId) && !normalizedEndpoint().isEmpty()) {
                 loadThreadPage(currentThreadId, currentThreadTitle, null, currentThreadFullLoaded, false);
@@ -3711,6 +3737,12 @@ public class MainActivity extends Activity {
         renderQueuedTurns();
         rerenderCurrentThreadMessages();
         scrollThreadToBottom(true);
+        rememberThreadRequestStatus(
+                "Sending",
+                turn.payload,
+                "Sent to desktop. Waiting for Codex to finish.",
+                false,
+                turn.id);
         setThreadTurnStatus("Sending queued message...", false);
 
         networkExecutor.execute(() -> {
@@ -3725,6 +3757,12 @@ public class MainActivity extends Activity {
                     }
                     renderQueuedTurns();
                     updateThreadComposerState();
+                    rememberThreadRequestStatus(
+                            "Completed",
+                            turn.payload,
+                            "Completed by Codex.",
+                            false,
+                            turn.id);
                     setThreadTurnStatus("Queued message sent.", false);
                     if (threadId.equals(currentThreadId)) {
                         loadThreadPage(threadId, threadTitle, null, false, false);
@@ -3739,10 +3777,18 @@ public class MainActivity extends Activity {
                     }
                     if (isConflictError(error)) {
                         currentThreadActive = true;
+                        rememberThreadRequestStatus(
+                                "Waiting",
+                                turn.payload,
+                                "Desktop reports this chat is still processing. Queue will retry.",
+                                false,
+                                turn.id);
                         setThreadTurnStatus("Codex is still processing. Queue will retry when it finishes.", false);
                         scheduleThreadPoll();
                     } else {
-                        setThreadTurnStatus(friendlyThreadError(error, "Queued send failed."), true);
+                        String friendly = friendlyThreadError(error, "Queued send failed.");
+                        rememberThreadRequestStatus("Error", turn.payload, friendly, true, turn.id);
+                        setThreadTurnStatus(friendly, true);
                     }
                     if (removedBeforeSend && !payloadIsQueued(turn.payload)) {
                         queuedThreadTurns.add(0, turn);
@@ -3939,6 +3985,9 @@ public class MainActivity extends Activity {
             return;
         }
         persistQueue();
+        if (turn.id.equals(lastRequestId)) {
+            updateRequestStatusPill("Editing", requestSummary(turn.payload), "Removed from queue for editing.", false, turn.id, true);
+        }
         threadPromptInput.setText(turn.payload.optString("prompt", ""));
         threadPromptInput.setSelection(threadPromptInput.length());
         selectedImageUri = null;
@@ -3960,6 +4009,9 @@ public class MainActivity extends Activity {
             renderQueuedTurns();
             rerenderCurrentThreadMessages();
             updateThreadComposerState();
+            if (turn.id.equals(lastRequestId)) {
+                updateRequestStatusPill("Deleted", requestSummary(turn.payload), "Removed from the phone queue.", false, turn.id, true);
+            }
             setThreadTurnStatus(queuedThreadTurns.isEmpty()
                     ? "Queue cleared."
                     : "Queued message deleted.", false);
@@ -4519,6 +4571,219 @@ public class MainActivity extends Activity {
     private void setCatalogStatus(String message, boolean isError) {
         catalogStatusView.setText(message);
         catalogStatusView.setTextColor(isError ? COLOR_ACCENT : COLOR_MUTED);
+    }
+
+    private void rememberThreadRequestStatus(String stage, JSONObject payload, String detail, boolean isError) {
+        rememberThreadRequestStatus(stage, payload, detail, isError, "");
+    }
+
+    private void rememberThreadRequestStatus(String stage, JSONObject payload, String detail, boolean isError, String requestId) {
+        updateRequestStatusPill(
+                stage,
+                payload == null ? "" : requestSummary(payload),
+                detail,
+                isError,
+                requestId,
+                true);
+    }
+
+    private void updateRequestStatusPill(
+            String stage,
+            String summary,
+            String detail,
+            boolean isError,
+            String requestId,
+            boolean persist
+    ) {
+        lastRequestStage = stage == null ? "" : stage.trim();
+        lastRequestSummary = summary == null ? "" : summary.trim();
+        lastRequestDetail = detail == null ? "" : detail.trim();
+        lastRequestId = requestId == null ? "" : requestId.trim();
+        lastRequestIsError = isError;
+        lastRequestAt = System.currentTimeMillis();
+        renderRequestStatusPill();
+        if (persist) {
+            persistThreadRequestStatus();
+        }
+    }
+
+    private void renderRequestStatusPill() {
+        if (requestStatusPillView == null) {
+            return;
+        }
+        if (lastRequestStage.isEmpty() && lastRequestSummary.isEmpty()) {
+            requestStatusPillView.setVisibility(View.GONE);
+            return;
+        }
+
+        StringBuilder builder = new StringBuilder();
+        builder.append("Last request: ");
+        builder.append(lastRequestStage.isEmpty() ? "Status unknown" : lastRequestStage);
+        if (!lastRequestSummary.isEmpty()) {
+            builder.append("\n").append(lastRequestSummary);
+        }
+        String detail = lastRequestDetail;
+        String when = lastRequestAt > 0 ? timeFormat.format(new Date(lastRequestAt)) : "";
+        if (!detail.isEmpty() || !when.isEmpty()) {
+            builder.append("\n");
+            if (!detail.isEmpty()) {
+                builder.append(detail);
+            }
+            if (!detail.isEmpty() && !when.isEmpty()) {
+                builder.append(" - ");
+            }
+            if (!when.isEmpty()) {
+                builder.append(when);
+            }
+        }
+
+        int textColor = requestStatusTextColor(lastRequestStage, lastRequestIsError);
+        int backgroundColor = requestStatusBackgroundColor(lastRequestStage, lastRequestIsError);
+        requestStatusPillView.setText(builder.toString());
+        requestStatusPillView.setTextColor(textColor);
+        requestStatusPillView.setBackground(outlineDrawable(backgroundColor, textColor, dp(16)));
+        requestStatusPillView.setVisibility(View.VISIBLE);
+    }
+
+    private int requestStatusTextColor(String stage, boolean isError) {
+        if (isError || "Error".equalsIgnoreCase(stage)) {
+            return COLOR_ACCENT;
+        }
+        if ("Completed".equalsIgnoreCase(stage)) {
+            return COLOR_PRIMARY;
+        }
+        if ("Sending".equalsIgnoreCase(stage) || "Processing".equalsIgnoreCase(stage) || "Waiting".equalsIgnoreCase(stage)) {
+            return Color.rgb(126, 87, 19);
+        }
+        return COLOR_MUTED;
+    }
+
+    private int requestStatusBackgroundColor(String stage, boolean isError) {
+        if (isError || "Error".equalsIgnoreCase(stage)) {
+            return Color.rgb(255, 244, 241);
+        }
+        if ("Completed".equalsIgnoreCase(stage)) {
+            return Color.rgb(237, 249, 245);
+        }
+        if ("Sending".equalsIgnoreCase(stage) || "Processing".equalsIgnoreCase(stage) || "Waiting".equalsIgnoreCase(stage)) {
+            return Color.rgb(255, 249, 230);
+        }
+        return Color.rgb(248, 248, 244);
+    }
+
+    private String requestSummary(JSONObject payload) {
+        if (payload == null) {
+            return "";
+        }
+        String prompt = payload.optString("prompt", "").trim();
+        if (prompt.isEmpty()) {
+            prompt = "Image-only message";
+        }
+        JSONArray images = payload.optJSONArray("images");
+        int imageCount = images == null ? 0 : images.length();
+        if (imageCount > 0) {
+            prompt = prompt + " (" + imageCount + (imageCount == 1 ? " image" : " images") + ")";
+        }
+        prompt = prompt.replace('\r', ' ').replace('\n', ' ').trim();
+        return prompt.length() > 120 ? prompt.substring(0, 117).trim() + "..." : prompt;
+    }
+
+    private void syncRequestStatusWithThreadState() {
+        if (currentThreadId == null || currentThreadId.isEmpty() || lastRequestStage.isEmpty()) {
+            return;
+        }
+        if (lastRequestIsError || "Completed".equalsIgnoreCase(lastRequestStage)) {
+            return;
+        }
+        if ("Queued".equalsIgnoreCase(lastRequestStage) && queuedContainsRequestId(lastRequestId)) {
+            return;
+        }
+        if (currentThreadActive) {
+            updateRequestStatusPill(
+                    "Processing",
+                    lastRequestSummary,
+                    "Desktop reports this chat is still active.",
+                    false,
+                    lastRequestId,
+                    true);
+        } else if (!isSendingThreadTurn && queuedThreadTurns.isEmpty()) {
+            updateRequestStatusPill(
+                    "Completed",
+                    lastRequestSummary,
+                    "Desktop is idle and the latest chat content was loaded.",
+                    false,
+                    lastRequestId,
+                    true);
+        }
+    }
+
+    private boolean queuedContainsRequestId(String requestId) {
+        if (requestId == null || requestId.isEmpty()) {
+            return false;
+        }
+        for (QueuedTurn turn : queuedThreadTurns) {
+            if (requestId.equals(turn.id)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void persistThreadRequestStatus() {
+        if (preferences == null || currentThreadId == null || currentThreadId.isEmpty()) {
+            return;
+        }
+        try {
+            JSONObject object = new JSONObject()
+                    .put("stage", lastRequestStage)
+                    .put("summary", lastRequestSummary)
+                    .put("detail", lastRequestDetail)
+                    .put("requestId", lastRequestId)
+                    .put("isError", lastRequestIsError)
+                    .put("at", lastRequestAt);
+            preferences.edit().putString(requestStatusPrefKey(currentThreadId), object.toString()).apply();
+        } catch (JSONException ignored) {
+        }
+    }
+
+    private void loadThreadRequestStatus() {
+        if (preferences == null || currentThreadId == null || currentThreadId.isEmpty()) {
+            clearVisibleRequestStatus();
+            return;
+        }
+        String raw = preferences.getString(requestStatusPrefKey(currentThreadId), "");
+        if (raw == null || raw.trim().isEmpty()) {
+            clearVisibleRequestStatus();
+            return;
+        }
+        try {
+            JSONObject object = new JSONObject(raw);
+            lastRequestStage = object.optString("stage", "");
+            lastRequestSummary = object.optString("summary", "");
+            lastRequestDetail = object.optString("detail", "");
+            lastRequestId = object.optString("requestId", "");
+            lastRequestIsError = object.optBoolean("isError", false);
+            lastRequestAt = object.optLong("at", 0L);
+            renderRequestStatusPill();
+        } catch (JSONException error) {
+            clearVisibleRequestStatus();
+        }
+    }
+
+    private void clearVisibleRequestStatus() {
+        lastRequestStage = "";
+        lastRequestSummary = "";
+        lastRequestDetail = "";
+        lastRequestId = "";
+        lastRequestAt = 0L;
+        lastRequestIsError = false;
+        if (requestStatusPillView != null) {
+            requestStatusPillView.setVisibility(View.GONE);
+        }
+    }
+
+    private String requestStatusPrefKey(String threadId) {
+        return PREF_REQUEST_STATUS_PREFIX + safeFileName(threadId);
     }
 
     private void setThreadTurnStatus(String message, boolean isError) {
