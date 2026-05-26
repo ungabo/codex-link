@@ -3753,12 +3753,25 @@ public class MainActivity extends Activity {
             if (requestStage != null && !requestStage.isEmpty() && currentThreadId.equals(threadId)) {
                 updateRequestStatusPill(requestStage, requestSummary, status, isError, requestId, true);
             }
-            if (threadId != null && threadId.equals(currentThreadId) && !normalizedEndpoint().isEmpty()) {
+            if (threadId != null
+                    && threadId.equals(currentThreadId)
+                    && !normalizedEndpoint().isEmpty()
+                    && shouldRefreshThreadForQueueStage(requestStage)) {
                 loadThreadPage(currentThreadId, currentThreadTitle, null, currentThreadFullLoaded, false);
             }
         } else if (status != null && !status.isEmpty()) {
             setCatalogStatus(status, isError);
         }
+    }
+
+    private boolean shouldRefreshThreadForQueueStage(String requestStage) {
+        if (requestStage == null || requestStage.isEmpty()) {
+            return false;
+        }
+        return "Sending".equalsIgnoreCase(requestStage)
+                || "Processing".equalsIgnoreCase(requestStage)
+                || "Completed".equalsIgnoreCase(requestStage)
+                || "Error".equalsIgnoreCase(requestStage);
     }
 
     private void forceSendQueuedTurn(QueuedTurn turn) {
@@ -3816,7 +3829,7 @@ public class MainActivity extends Activity {
                 boolean stillProcessing = isProcessingTurnResponse(responseBody);
                 String acceptedStage = stillProcessing ? "Processing" : "Completed";
                 String acceptedDetail = stillProcessing
-                        ? "Received by Windows. Codex is still processing."
+                        ? "Received by Windows once and removed from the phone queue. Waiting for Windows to finish."
                         : "Received by Windows and completed by Codex.";
                 mainHandler.post(() -> {
                     isSendingThreadTurn = false;
@@ -3861,10 +3874,10 @@ public class MainActivity extends Activity {
                         rememberThreadRequestStatus(
                                 "Waiting",
                                 turn.payload,
-                                "Desktop reports this chat is still processing. Queue will retry.",
+                                "Windows is processing this chat. Queue will retry when it finishes.",
                                 false,
                                 turn.id);
-                        setThreadTurnStatus("Codex is still processing. Queue will retry when it finishes.", false);
+                        setThreadTurnStatus("Windows is processing. Queue will retry when it finishes.", false);
                         scheduleThreadPoll();
                     } else {
                         String friendly = friendlyThreadError(error, "Queued send failed.");
@@ -4084,7 +4097,7 @@ public class MainActivity extends Activity {
         }
         int index = queuedThreadTurns.indexOf(turn);
         if (index == 0 && currentThreadActive) {
-            return "Waiting: Codex is processing this chat.";
+            return "Waiting: Windows is processing the current request. This sends next.";
         }
         if (index > 0) {
             return "Queued on phone. Will send after earlier queued messages.";
@@ -4943,7 +4956,7 @@ public class MainActivity extends Activity {
         }
 
         StringBuilder builder = new StringBuilder();
-        builder.append("Last request: ");
+        builder.append(requestStatusLabel()).append(": ");
         builder.append(lastRequestStage.isEmpty() ? "Status unknown" : lastRequestStage);
         if (!lastRequestSummary.isEmpty()) {
             builder.append("\n").append(lastRequestSummary);
@@ -4969,6 +4982,23 @@ public class MainActivity extends Activity {
         requestStatusPillView.setTextColor(textColor);
         requestStatusPillView.setBackground(outlineDrawable(backgroundColor, textColor, dp(16)));
         requestStatusPillView.setVisibility(View.VISIBLE);
+    }
+
+    private String requestStatusLabel() {
+        if (queuedContainsRequestId(lastRequestId)) {
+            return "Queued request";
+        }
+        if ("Sending".equalsIgnoreCase(lastRequestStage)
+                || "Processing".equalsIgnoreCase(lastRequestStage)) {
+            return "Windows request";
+        }
+        if ("Waiting".equalsIgnoreCase(lastRequestStage)) {
+            return "Queue status";
+        }
+        if ("Completed".equalsIgnoreCase(lastRequestStage)) {
+            return "Last sent";
+        }
+        return "Request status";
     }
 
     private int requestStatusTextColor(String stage, boolean isError) {
@@ -5026,7 +5056,7 @@ public class MainActivity extends Activity {
                 updateRequestStatusPill(
                         "Waiting",
                         lastRequestSummary,
-                        "Desktop reports this chat is still active. Queue will retry.",
+                        "Windows is processing this chat. Queue will retry when it finishes.",
                         false,
                         lastRequestId,
                         true);
@@ -5037,15 +5067,17 @@ public class MainActivity extends Activity {
             updateRequestStatusPill(
                     "Processing",
                     lastRequestSummary,
-                    "Desktop reports this chat is still active.",
+                    "Windows is processing the accepted request. Queued messages will wait.",
                     false,
                     lastRequestId,
                     true);
-        } else if (!isSendingThreadTurn && queuedThreadTurns.isEmpty()) {
+        } else if (!isSendingThreadTurn) {
             updateRequestStatusPill(
                     "Completed",
                     lastRequestSummary,
-                    "Desktop is idle and the latest chat content was loaded.",
+                    queuedThreadTurns.isEmpty()
+                            ? "Windows is idle and the latest chat content was loaded."
+                            : "Windows is idle. The queue can send the next message.",
                     false,
                     lastRequestId,
                     true);

@@ -191,10 +191,13 @@ public class CodexQueueService extends Service {
                     Log.i(TAG, "Queue thread " + queue.threadId + " active=" + state.active);
                     if (state.active) {
                         sawBusyThread = true;
-                        lastStatus = "Desktop reports this chat is still processing. Queue will retry.";
+                        lastStatus = activeStatusText(state);
                         broadcastQueueChanged(queue.threadId, item, "Waiting", lastStatus, false);
                         continue;
                     }
+                    markThreadProcessingHistoryCompleted(
+                            queue.threadId,
+                            "Windows is idle. The accepted request finished and the queue is continuing.");
 
                     String turnsEndpoint = threadTurnsEndpointFor(config.endpoint, queue.threadId);
                     Log.i(TAG, "Posting queued turn for " + queue.threadId + " to " + turnsEndpoint);
@@ -203,7 +206,7 @@ public class CodexQueueService extends Service {
                     Log.i(TAG, "Queued turn result for " + queue.threadId + ": HTTP " + result.status);
                     if (result.status == 409) {
                         sawBusyThread = true;
-                        lastStatus = "Desktop reports this chat is still processing. Queue will retry.";
+                        lastStatus = "Windows is processing this chat. Queue will retry when it finishes.";
                         broadcastQueueChanged(queue.threadId, item, "Waiting", lastStatus, false);
                         continue;
                     }
@@ -219,7 +222,7 @@ public class CodexQueueService extends Service {
                     String sentDetail;
                     if (isProcessingResponse(result)) {
                         sentStage = "Processing";
-                        sentDetail = "Received by Windows. Codex is still processing.";
+                        sentDetail = "Received by Windows once and removed from the phone queue. Waiting for Windows to finish.";
                     } else {
                         sentStage = "Completed";
                         sentDetail = "Received by Windows and completed by Codex.";
@@ -261,15 +264,46 @@ public class CodexQueueService extends Service {
         }
         boolean active = thread.optBoolean("active", false);
         boolean staleActive = thread.optBoolean("staleActive", false);
-        return new ThreadState(active && !staleActive);
+        JSONObject activity = response.optJSONObject("activity");
+        if (activity != null) {
+            active = thread.optBoolean("active", activity.optBoolean("active", active));
+            staleActive = thread.optBoolean("staleActive", activity.optBoolean("staleActive", staleActive));
+        }
+        return new ThreadState(
+                active && !staleActive,
+                thread.optString("status", activity == null ? "" : activity.optString("status", "")),
+                thread.optString("activeTurnId", activity == null ? "" : activity.optString("activeTurnId", "")),
+                thread.optString("activeStartedAt", activity == null ? "" : activity.optString("activeStartedAt", "")),
+                activity == null ? 0 : activity.optInt("activeCount", 0));
     }
 
     private static class ThreadState {
         final boolean active;
+        final String status;
+        final String activeTurnId;
+        final String activeStartedAt;
+        final int activeCount;
 
-        ThreadState(boolean active) {
+        ThreadState(boolean active, String status, String activeTurnId, String activeStartedAt, int activeCount) {
             this.active = active;
+            this.status = status == null ? "" : status;
+            this.activeTurnId = activeTurnId == null ? "" : activeTurnId;
+            this.activeStartedAt = activeStartedAt == null ? "" : activeStartedAt;
+            this.activeCount = activeCount;
         }
+    }
+
+    private String activeStatusText(ThreadState state) {
+        StringBuilder builder = new StringBuilder();
+        builder.append("Windows is processing this chat.");
+        if (state != null && !state.activeStartedAt.isEmpty()) {
+            builder.append(" Active since ").append(state.activeStartedAt).append(".");
+        }
+        if (state != null && state.activeCount > 1) {
+            builder.append(" ").append(state.activeCount).append(" active turns are reported.");
+        }
+        builder.append(" Queue will retry when it finishes.");
+        return builder.toString();
     }
 
     private EndpointConfig endpointConfig() {
@@ -505,6 +539,42 @@ public class CodexQueueService extends Service {
                 }
             } catch (Exception error) {
                 Log.w(TAG, "Could not archive sent queue item " + threadId, error);
+            }
+        }
+    }
+
+    private void markThreadProcessingHistoryCompleted(String threadId, String detail) {
+        if (threadId == null || threadId.isEmpty()) {
+            return;
+        }
+        File file = sentQueueFileForThread(threadId);
+        synchronized (CodexQueueService.class) {
+            JSONArray array = readJsonArrayFile(file);
+            boolean changed = false;
+            long completedAt = System.currentTimeMillis();
+            for (int index = 0; index < array.length(); index++) {
+                JSONObject item = array.optJSONObject(index);
+                if (item == null) {
+                    continue;
+                }
+                if ("Processing".equalsIgnoreCase(item.optString("stage", ""))) {
+                    try {
+                        item.put("stage", "Completed");
+                        item.put("detail", detail == null ? "Windows is idle. The request finished." : detail);
+                        item.put("completedAt", completedAt);
+                        changed = true;
+                    } catch (JSONException error) {
+                        Log.w(TAG, "Could not update sent queue history item", error);
+                    }
+                }
+            }
+            if (!changed) {
+                return;
+            }
+            try (FileOutputStream output = new FileOutputStream(file, false)) {
+                output.write(array.toString().getBytes(StandardCharsets.UTF_8));
+            } catch (Exception error) {
+                Log.w(TAG, "Could not mark queue history completed for " + threadId, error);
             }
         }
     }
