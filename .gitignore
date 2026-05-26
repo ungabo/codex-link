@@ -2,6 +2,8 @@
 build/
 local.properties
 captures/
+queue-backups/
+tmp-phone-queue-repair/
 *.apk
 *.aab
 *.jks

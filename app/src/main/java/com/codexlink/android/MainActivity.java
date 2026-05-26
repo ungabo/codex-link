@@ -5021,7 +5021,16 @@ public class MainActivity extends Activity {
         if (lastRequestIsError || "Completed".equalsIgnoreCase(lastRequestStage)) {
             return;
         }
-        if ("Queued".equalsIgnoreCase(lastRequestStage) && queuedContainsRequestId(lastRequestId)) {
+        if (queuedContainsRequestId(lastRequestId)) {
+            if (currentThreadActive && !"Waiting".equalsIgnoreCase(lastRequestStage)) {
+                updateRequestStatusPill(
+                        "Waiting",
+                        lastRequestSummary,
+                        "Desktop reports this chat is still active. Queue will retry.",
+                        false,
+                        lastRequestId,
+                        true);
+            }
             return;
         }
         if (currentThreadActive) {

@@ -10,12 +10,14 @@ import json
 import mimetypes
 import os
 from pathlib import Path
+import queue
 import re
 import shutil
 import sqlite3
 import subprocess
 import tempfile
 import threading
+import time
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
@@ -1466,6 +1468,103 @@ def run_phase0_command(command: list[str], timeout: int) -> subprocess.Completed
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
+def stream_to_queue(stream: Any, output: "queue.Queue[str]") -> None:
+    try:
+        for line in iter(stream.readline, ""):
+            if line:
+                output.put(line)
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+
+def drain_queue(output: "queue.Queue[str]") -> list[str]:
+    lines: list[str] = []
+    while True:
+        try:
+            lines.append(output.get_nowait())
+        except queue.Empty:
+            return lines
+
+
+def reap_background_phase0_process(
+    process: subprocess.Popen[str],
+    command: list[str],
+    stdout_queue: "queue.Queue[str]",
+    stderr_queue: "queue.Queue[str]",
+) -> None:
+    try:
+        process.wait(timeout=60 * 60)
+    except subprocess.TimeoutExpired:
+        kill_process_tree(process.pid)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+    drain_queue(stdout_queue)
+    drain_queue(stderr_queue)
+
+
+def run_phase0_turn_until_started(command: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+    process = subprocess.Popen(
+        command,
+        cwd=PHASE0_DIR,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        creationflags=creationflags,
+    )
+    stdout_queue: "queue.Queue[str]" = queue.Queue()
+    stderr_queue: "queue.Queue[str]" = queue.Queue()
+    if process.stdout is not None:
+        threading.Thread(target=stream_to_queue, args=(process.stdout, stdout_queue), daemon=True).start()
+    if process.stderr is not None:
+        threading.Thread(target=stream_to_queue, args=(process.stderr, stderr_queue), daemon=True).start()
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        stderr_lines.extend(drain_queue(stderr_queue))
+        try:
+            line = stdout_queue.get(timeout=0.1)
+        except queue.Empty:
+            if process.poll() is not None:
+                stdout_lines.extend(drain_queue(stdout_queue))
+                stderr_lines.extend(drain_queue(stderr_queue))
+                return subprocess.CompletedProcess(
+                    command,
+                    process.returncode,
+                    "".join(stdout_lines),
+                    "".join(stderr_lines),
+                )
+            continue
+
+        stdout_lines.append(line)
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            continue
+        try:
+            message = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(message, dict) and message.get("ok") and message.get("event") == "started":
+            threading.Thread(
+                target=reap_background_phase0_process,
+                args=(process, command, stdout_queue, stderr_queue),
+                daemon=True,
+            ).start()
+            return subprocess.CompletedProcess(command, 0, "".join(stdout_lines), "".join(stderr_lines))
+
+    kill_process_tree(process.pid)
+    stdout_lines.extend(drain_queue(stdout_queue))
+    stderr_lines.extend(drain_queue(stderr_queue))
+    raise subprocess.TimeoutExpired(command, timeout, output="".join(stdout_lines), stderr="".join(stderr_lines))
+
+
 class CodexLinkHandler(BaseHTTPRequestHandler):
     codex_home: Path
     token: str | None
@@ -1808,7 +1907,8 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
 
             if checkpoint_result is not None:
                 result["checkpoint"] = checkpoint_result
-            self.write_json(result)
+            response_status = 202 if result.get("accepted") and not result.get("completed", True) else 200
+            self.write_json(result, status=response_status)
             return
 
         if path not in {"/link", "/codex/link"}:
@@ -1904,9 +2004,9 @@ def run_codex_turn(
                 },
                 handle,
             )
-        command = [npm, "run", "send-turn", "--", "--payload-file", str(payload_path)]
+        command = [npm, "run", "send-turn", "--", "--payload-file", str(payload_path), "--emit-started"]
 
-        completed = run_phase0_command(command, timeout=240)
+        completed = run_phase0_turn_until_started(command, timeout=90)
     finally:
         if payload_path is not None:
             try:
@@ -1934,8 +2034,24 @@ def run_codex_turn(
     if not isinstance(result, dict) or not result.get("ok"):
         raise RuntimeError(f"Codex turn failed: {json_line}")
 
+    if result.get("event") == "started" or (result.get("accepted") and not result.get("completed", True)):
+        return {
+            "ok": True,
+            "accepted": True,
+            "completed": False,
+            "status": "processing",
+            "source": "codex-app-server",
+            "threadId": result.get("threadId") or thread_id,
+            "turnId": result.get("turnId") or "",
+            "agentText": "",
+            "notificationCounts": {},
+        }
+
     return {
         "ok": True,
+        "accepted": True,
+        "completed": True,
+        "status": "completed",
         "source": "codex-app-server",
         "threadId": result.get("threadId"),
         "turnId": result.get("turnId"),

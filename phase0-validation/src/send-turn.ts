@@ -133,6 +133,7 @@ async function main(): Promise<void> {
   let appServerProcess: ChildProcessWithoutNullStreams | undefined;
   let agentText = "";
   let turnId = "";
+  const emitStarted = process.argv.includes("--emit-started");
 
   try {
     const version = execFileSync(config.codexPath, ["--version"], { encoding: "utf8" }).trim();
@@ -192,6 +193,22 @@ async function main(): Promise<void> {
       60000,
     );
     turnId = String(((turn as JsonObject).turn as JsonObject | undefined)?.id ?? turnId);
+    if (emitStarted) {
+      console.log(
+        JSON.stringify({
+          ok: true,
+          event: "started",
+          accepted: true,
+          completed: false,
+          status: "processing",
+          codexVersion: version,
+          threadId,
+          turnId,
+          rawLogPath,
+          serverLogPath,
+        }),
+      );
+    }
 
     await waitForTurnCompleted(notifications, threadId, turnId, config.turnTimeoutMs);
     socket.close();
