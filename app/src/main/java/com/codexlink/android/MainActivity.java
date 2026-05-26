@@ -10,6 +10,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Color;
@@ -147,6 +148,7 @@ public class MainActivity extends Activity {
     private TextView attachmentStatusView;
     private TextView connectionSummaryView;
     private TextView appTitleView;
+    private TextView installStampView;
     private TextView catalogTitleView;
     private LinearLayout catalogSectionLayout;
     private LinearLayout catalogHostRowLayout;
@@ -280,6 +282,26 @@ public class MainActivity extends Activity {
             this.oldestAt = oldestAt;
             this.firstPrompt = firstPrompt;
             this.imageCount = imageCount;
+        }
+    }
+
+    private static class SentQueueInfo {
+        final String threadId;
+        final String title;
+        final String itemId;
+        final String stage;
+        final String detail;
+        final String prompt;
+        final long sentAt;
+
+        SentQueueInfo(String threadId, String title, String itemId, String stage, String detail, String prompt, long sentAt) {
+            this.threadId = threadId;
+            this.title = title;
+            this.itemId = itemId;
+            this.stage = stage;
+            this.detail = detail;
+            this.prompt = prompt;
+            this.sentAt = sentAt;
         }
     }
 
@@ -531,8 +553,12 @@ public class MainActivity extends Activity {
         threadComposerLayout.setVisibility(View.GONE);
 
         appTitleView = text("Codex Link", 23, COLOR_INK, Typeface.BOLD);
-        appTitleView.setPadding(0, 0, 0, dp(10));
+        appTitleView.setPadding(0, 0, 0, dp(2));
         root.addView(appTitleView);
+
+        installStampView = text(buildInstallStampText(), 12, COLOR_MUTED, Typeface.NORMAL);
+        installStampView.setPadding(0, 0, 0, dp(10));
+        root.addView(installStampView);
 
         root.addView(buildCatalogSection());
         root.addView(spacer(dp(10)));
@@ -674,7 +700,7 @@ public class MainActivity extends Activity {
             if (hasFocus && threadActionsExpanded) {
                 threadActionsExpanded = false;
                 renderThreadControls(currentThreadFullLoaded);
-                restoreThreadPromptFocus(threadPromptInput.length());
+                restoreThreadPromptSelection(threadPromptInput.length());
             }
         });
         row.addView(threadPromptInput, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
@@ -1351,6 +1377,16 @@ public class MainActivity extends Activity {
         setStatus("Clipboard text loaded.", false);
     }
 
+    private void copyTextToClipboard(String value) {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (clipboard == null) {
+            setThreadTurnStatus("Clipboard is not available.", true);
+            return;
+        }
+        clipboard.setPrimaryClip(ClipData.newPlainText("Codex Link", value == null ? "" : value));
+        setThreadTurnStatus("Copied to clipboard.", false);
+    }
+
     private void loadCatalog() {
         String endpoint = normalizedEndpoint();
         String token = tokenInput.getText().toString().trim();
@@ -1563,6 +1599,13 @@ public class MainActivity extends Activity {
         builder.append(" in ").append(queues.size()).append(" chat");
         if (queues.size() != 1) {
             builder.append("s");
+        }
+        int sentHistory = sentQueueHistoryCount();
+        if (sentHistory > 0) {
+            builder.append("\nSent queue history: ").append(sentHistory).append(" message");
+            if (sentHistory != 1) {
+                builder.append("s");
+            }
         }
 
         if (currentThreadId != null && !currentThreadId.isEmpty()) {
@@ -2134,14 +2177,14 @@ public class MainActivity extends Activity {
             if (prepend) {
                 int addedHeight = messageListLayout.getHeight() - previousHeight;
                 rootScrollView.scrollTo(0, Math.max(0, previousScrollY + addedHeight));
-            } else if (promptFocused) {
-                rootScrollView.scrollTo(0, Math.max(0, previousScrollY));
-                restoreThreadPromptFocus(promptSelection);
             } else {
                 if (wasNearBottom) {
                     scrollThreadToBottom(false);
                 } else {
                     restoreThreadScrollAnchor(scrollAnchor, previousScrollY);
+                }
+                if (promptFocused) {
+                    restoreThreadPromptSelection(promptSelection);
                 }
                 maybeRunQueuedTurn();
             }
@@ -2374,6 +2417,17 @@ public class MainActivity extends Activity {
         return title + " - " + scope;
     }
 
+    private String buildInstallStampText() {
+        long updatedAt = 0L;
+        try {
+            PackageInfo packageInfo = getPackageManager().getPackageInfo(getPackageName(), 0);
+            updatedAt = packageInfo.lastUpdateTime;
+        } catch (Exception ignored) {
+        }
+        long stamp = updatedAt > 0 ? updatedAt : System.currentTimeMillis();
+        return "Installed v" + BuildConfig.VERSION_NAME + " at " + timeFormat.format(new Date(stamp));
+    }
+
     private void renderThreadControls(boolean full) {
         threadControlsLayout.removeAllViews();
         threadControlsLayout.setVisibility(View.VISIBLE);
@@ -2384,6 +2438,12 @@ public class MainActivity extends Activity {
         summaryView.setLineSpacing(dp(1), 1.0f);
         summaryView.setPadding(0, 0, 0, dp(4));
         threadControlsLayout.addView(summaryView, matchWrap());
+
+        TextView stampView = text(buildInstallStampText(), 11, COLOR_MUTED, Typeface.NORMAL);
+        stampView.setSingleLine(true);
+        stampView.setEllipsize(TextUtils.TruncateAt.END);
+        stampView.setPadding(0, 0, 0, dp(4));
+        threadControlsLayout.addView(stampView, matchWrap());
 
         threadControlsLayout.addView(buildPrimaryThreadControlRow(full), matchWrap());
         if (threadComposerLayout != null) {
@@ -3070,12 +3130,19 @@ public class MainActivity extends Activity {
             return;
         }
         threadPromptInput.requestFocus();
-        int safeSelection = Math.min(Math.max(0, selection), threadPromptInput.length());
-        threadPromptInput.setSelection(safeSelection);
+        restoreThreadPromptSelection(selection);
         InputMethodManager inputMethodManager = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
         if (inputMethodManager != null) {
             inputMethodManager.showSoftInput(threadPromptInput, InputMethodManager.SHOW_IMPLICIT);
         }
+    }
+
+    private void restoreThreadPromptSelection(int selection) {
+        if (threadPromptInput == null) {
+            return;
+        }
+        int safeSelection = Math.min(Math.max(0, selection), threadPromptInput.length());
+        threadPromptInput.setSelection(safeSelection);
     }
 
     private ScrollAnchor captureThreadScrollAnchor() {
@@ -3729,10 +3796,6 @@ public class MainActivity extends Activity {
 
         isSendingThreadTurn = true;
         sendingThreadPayload = turn.payload;
-        boolean removedBeforeSend = queuedThreadTurns.remove(turn);
-        if (removedBeforeSend) {
-            persistQueue();
-        }
         updateThreadComposerState();
         renderQueuedTurns();
         rerenderCurrentThreadMessages();
@@ -3740,7 +3803,7 @@ public class MainActivity extends Activity {
         rememberThreadRequestStatus(
                 "Sending",
                 turn.payload,
-                "Sent to desktop. Waiting for Codex to finish.",
+                "Sending to Windows.",
                 false,
                 turn.id);
         setThreadTurnStatus("Sending queued message...", false);
@@ -3749,21 +3812,39 @@ public class MainActivity extends Activity {
             try {
                 String turnsEndpoint = threadTurnsEndpointFor(endpoint, threadId);
                 Log.i(TAG, "Sending queued thread turn to " + turnsEndpoint);
-                postThreadPayload(turnsEndpoint, token, turn.payload);
+                String responseBody = postThreadPayload(turnsEndpoint, token, turn.payload);
+                boolean stillProcessing = isProcessingTurnResponse(responseBody);
+                String acceptedStage = stillProcessing ? "Processing" : "Completed";
+                String acceptedDetail = stillProcessing
+                        ? "Received by Windows. Codex is still processing."
+                        : "Received by Windows and completed by Codex.";
                 mainHandler.post(() -> {
                     isSendingThreadTurn = false;
                     if (samePayload(sendingThreadPayload, turn.payload)) {
                         sendingThreadPayload = null;
                     }
+                    removeQueuedTurnFromStorage(threadId, turn, acceptedStage, acceptedDetail);
                     renderQueuedTurns();
                     updateThreadComposerState();
-                    rememberThreadRequestStatus(
-                            "Completed",
-                            turn.payload,
-                            "Completed by Codex.",
-                            false,
-                            turn.id);
-                    setThreadTurnStatus("Queued message sent.", false);
+                    if (stillProcessing) {
+                        currentThreadActive = true;
+                        rememberThreadRequestStatus(
+                                "Processing",
+                                turn.payload,
+                                acceptedDetail,
+                                false,
+                                turn.id);
+                        setThreadTurnStatus("Request sent. Codex is still processing.", false);
+                        scheduleThreadPoll();
+                    } else {
+                        rememberThreadRequestStatus(
+                                "Completed",
+                                turn.payload,
+                                acceptedDetail,
+                                false,
+                                turn.id);
+                        setThreadTurnStatus("Queued message sent.", false);
+                    }
                     if (threadId.equals(currentThreadId)) {
                         loadThreadPage(threadId, threadTitle, null, false, false);
                     }
@@ -3790,10 +3871,6 @@ public class MainActivity extends Activity {
                         rememberThreadRequestStatus("Error", turn.payload, friendly, true, turn.id);
                         setThreadTurnStatus(friendly, true);
                     }
-                    if (removedBeforeSend && !payloadIsQueued(turn.payload)) {
-                        queuedThreadTurns.add(0, turn);
-                        persistQueue();
-                    }
                     renderQueuedTurns();
                     rerenderCurrentThreadMessages();
                     updateThreadComposerState();
@@ -3805,6 +3882,21 @@ public class MainActivity extends Activity {
     private boolean isConflictError(Exception error) {
         String message = error == null ? "" : error.getMessage();
         return message != null && message.startsWith("HTTP 409");
+    }
+
+    private boolean isProcessingTurnResponse(String body) {
+        if (body == null || body.trim().isEmpty()) {
+            return false;
+        }
+        try {
+            JSONObject object = new JSONObject(body);
+            if ("processing".equalsIgnoreCase(object.optString("status", ""))) {
+                return true;
+            }
+            return object.optBoolean("accepted", false) && !object.optBoolean("completed", true);
+        } catch (JSONException ignored) {
+            return false;
+        }
     }
 
     private String friendlyThreadError(Exception error, String fallback) {
@@ -3916,6 +4008,10 @@ public class MainActivity extends Activity {
             preview.setSingleLine(true);
             preview.setEllipsize(TextUtils.TruncateAt.END);
             queuedTurnListLayout.addView(preview, matchWrap());
+            TextView status = text(queueStatusText(queuedThreadTurns.get(0)), 11, queueStatusColor(queuedThreadTurns.get(0)), Typeface.NORMAL);
+            status.setSingleLine(true);
+            status.setEllipsize(TextUtils.TruncateAt.END);
+            queuedTurnListLayout.addView(status, matchWrap());
             return;
         }
 
@@ -3930,6 +4026,12 @@ public class MainActivity extends Activity {
             summary.setMaxLines(2);
             summary.setEllipsize(TextUtils.TruncateAt.END);
             item.addView(summary, matchWrap());
+
+            TextView status = text(queueStatusText(turn), 11, queueStatusColor(turn), Typeface.BOLD);
+            status.setSingleLine(false);
+            status.setMaxLines(2);
+            status.setPadding(0, dp(5), 0, 0);
+            item.addView(status, matchWrap());
 
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
@@ -3960,6 +4062,44 @@ public class MainActivity extends Activity {
             queuedTurnListLayout.addView(item, matchWrap());
             queuedTurnListLayout.addView(spacer(dp(6)));
         }
+    }
+
+    private String queueStatusText(QueuedTurn turn) {
+        if (turn == null) {
+            return "";
+        }
+        if (turn.id.equals(lastRequestId) && !lastRequestStage.isEmpty()) {
+            StringBuilder builder = new StringBuilder();
+            builder.append(lastRequestStage);
+            if (!lastRequestDetail.isEmpty()) {
+                builder.append(": ").append(lastRequestDetail);
+            }
+            if (lastRequestAt > 0) {
+                builder.append(" - ").append(timeFormat.format(new Date(lastRequestAt)));
+            }
+            return builder.toString();
+        }
+        if (samePayload(turn.payload, sendingThreadPayload)) {
+            return "Sending to Windows.";
+        }
+        int index = queuedThreadTurns.indexOf(turn);
+        if (index == 0 && currentThreadActive) {
+            return "Waiting: Codex is processing this chat.";
+        }
+        if (index > 0) {
+            return "Queued on phone. Will send after earlier queued messages.";
+        }
+        return "Queued on phone. Ready when this chat is idle.";
+    }
+
+    private int queueStatusColor(QueuedTurn turn) {
+        if (turn != null && turn.id.equals(lastRequestId)) {
+            return requestStatusTextColor(lastRequestStage, lastRequestIsError);
+        }
+        if (turn != null && samePayload(turn.payload, sendingThreadPayload)) {
+            return Color.rgb(126, 87, 19);
+        }
+        return currentThreadActive ? Color.rgb(126, 87, 19) : COLOR_MUTED;
     }
 
     private String queueSummary(QueuedTurn turn) {
@@ -4102,6 +4242,41 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void removeQueuedTurnFromStorage(String threadId, QueuedTurn turn, String stage, String detail) {
+        if (threadId == null || threadId.isEmpty() || turn == null) {
+            return;
+        }
+        archiveSentQueuedTurn(threadId, turn, stage, detail);
+        if (threadId.equals(queueThreadId)) {
+            queuedThreadTurns.remove(turn);
+            persistQueue();
+            return;
+        }
+
+        File file = queueFileForThread(threadId);
+        synchronized (MainActivity.class) {
+            JSONArray existing = readJsonArrayFile(file);
+            JSONArray updated = new JSONArray();
+            boolean removed = false;
+            for (int index = 0; index < existing.length(); index++) {
+                JSONObject item = existing.optJSONObject(index);
+                if (item == null) {
+                    continue;
+                }
+                if (!removed && turn.id.equals(item.optString("id", ""))) {
+                    removed = true;
+                    continue;
+                }
+                updated.put(item);
+            }
+            try (FileOutputStream output = new FileOutputStream(file, false)) {
+                output.write(updated.toString().getBytes(StandardCharsets.UTF_8));
+            } catch (Exception error) {
+                Log.w(TAG, "Could not remove sent queued turn", error);
+            }
+        }
+    }
+
     private void unloadThreadQueue() {
         queuedThreadTurns.clear();
         queueThreadId = null;
@@ -4131,6 +4306,7 @@ public class MainActivity extends Activity {
             new AlertDialog.Builder(this)
                     .setTitle("Queued messages")
                     .setMessage("No phone messages are queued.")
+                    .setNeutralButton("Recent sent", (view, which) -> showSentQueueHistoryDialog())
                     .setPositiveButton("OK", null)
                     .show();
             return;
@@ -4146,6 +4322,53 @@ public class MainActivity extends Activity {
                     QueueInfo info = queues.get(which);
                     loadThread(info.threadId, info.title);
                 })
+                .setNeutralButton("Recent sent", (view, which) -> showSentQueueHistoryDialog())
+                .setNegativeButton("Close", null)
+                .show();
+    }
+
+    private void showSentQueueHistoryDialog() {
+        ArrayList<SentQueueInfo> history = allSentQueueHistory(30);
+        if (history.isEmpty()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("Recent sent")
+                    .setMessage("No sent queue history is stored yet.")
+                    .setPositiveButton("OK", null)
+                    .show();
+            return;
+        }
+
+        ArrayList<String> labels = new ArrayList<>();
+        for (SentQueueInfo info : history) {
+            String prompt = info.prompt == null || info.prompt.trim().isEmpty() ? "Image-only message" : info.prompt.trim();
+            if (prompt.length() > 100) {
+                prompt = prompt.substring(0, 97) + "...";
+            }
+            labels.add((info.title == null || info.title.isEmpty() ? info.threadId : info.title)
+                    + "\n" + info.stage + " - " + timeFormat.format(new Date(info.sentAt))
+                    + "\n" + prompt);
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle("Recent sent")
+                .setItems(labels.toArray(new String[0]), (dialog, which) -> showSentQueueHistoryItem(history.get(which)))
+                .setNegativeButton("Close", null)
+                .show();
+    }
+
+    private void showSentQueueHistoryItem(SentQueueInfo info) {
+        String prompt = info.prompt == null || info.prompt.isEmpty() ? "Image-only message" : info.prompt;
+        StringBuilder builder = new StringBuilder();
+        builder.append(info.stage).append(" at ").append(timeFormat.format(new Date(info.sentAt)));
+        if (info.detail != null && !info.detail.isEmpty()) {
+            builder.append("\n").append(info.detail);
+        }
+        builder.append("\n\n").append(prompt);
+        new AlertDialog.Builder(this)
+                .setTitle(info.title == null || info.title.isEmpty() ? "Sent queued message" : info.title)
+                .setMessage(builder.toString())
+                .setPositiveButton("Open chat", (dialog, which) -> loadThread(info.threadId, info.title))
+                .setNeutralButton("Copy", (dialog, which) -> copyTextToClipboard(prompt))
                 .setNegativeButton("Close", null)
                 .show();
     }
@@ -4204,6 +4427,109 @@ public class MainActivity extends Activity {
         }
         Collections.sort(queues, (left, right) -> Long.compare(left.oldestAt, right.oldestAt));
         return queues;
+    }
+
+    private ArrayList<SentQueueInfo> allSentQueueHistory(int limit) {
+        ArrayList<SentQueueInfo> history = new ArrayList<>();
+        File dir = new File(getFilesDir(), "queue-history");
+        File[] files = dir.listFiles((file, name) -> name.endsWith(".json"));
+        if (files == null) {
+            return history;
+        }
+        for (File file : files) {
+            String threadId = file.getName().substring(0, file.getName().length() - ".json".length());
+            try (InputStream input = new FileInputStream(file);
+                 ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[4096];
+                int read;
+                while ((read = input.read(buffer)) != -1) {
+                    output.write(buffer, 0, read);
+                }
+                JSONArray array = new JSONArray(output.toString(StandardCharsets.UTF_8.name()));
+                for (int index = 0; index < array.length(); index++) {
+                    JSONObject item = array.optJSONObject(index);
+                    if (item == null) {
+                        continue;
+                    }
+                    JSONObject payload = item.optJSONObject("payload");
+                    String prompt = payload == null ? "" : payload.optString("prompt", "");
+                    history.add(new SentQueueInfo(
+                            item.optString("threadId", threadId),
+                            titleForThreadId(item.optString("threadId", threadId)),
+                            item.optString("id", ""),
+                            item.optString("stage", "Sent"),
+                            item.optString("detail", ""),
+                            prompt,
+                            item.optLong("sentAt", 0L)));
+                }
+            } catch (Exception error) {
+                Log.w(TAG, "Could not read queue history " + file.getName(), error);
+            }
+        }
+        Collections.sort(history, (left, right) -> Long.compare(right.sentAt, left.sentAt));
+        if (limit > 0 && history.size() > limit) {
+            return new ArrayList<>(history.subList(0, limit));
+        }
+        return history;
+    }
+
+    private int sentQueueHistoryCount() {
+        return allSentQueueHistory(0).size();
+    }
+
+    private void archiveSentQueuedTurn(String threadId, QueuedTurn turn, String stage, String detail) {
+        if (threadId == null || threadId.isEmpty() || turn == null) {
+            return;
+        }
+        File file = sentQueueFileForThread(threadId);
+        synchronized (MainActivity.class) {
+            try {
+                File parent = file.getParentFile();
+                if (parent != null && !parent.exists()) {
+                    parent.mkdirs();
+                }
+                JSONArray array = readJsonArrayFile(file);
+                array.put(new JSONObject()
+                        .put("threadId", threadId)
+                        .put("id", turn.id)
+                        .put("createdAt", turn.createdAt)
+                        .put("sentAt", System.currentTimeMillis())
+                        .put("stage", stage == null || stage.isEmpty() ? "Sent" : stage)
+                        .put("detail", detail == null ? "" : detail)
+                        .put("payload", turn.payload));
+                JSONArray trimmed = new JSONArray();
+                int start = Math.max(0, array.length() - 50);
+                for (int index = start; index < array.length(); index++) {
+                    trimmed.put(array.opt(index));
+                }
+                try (FileOutputStream output = new FileOutputStream(file, false)) {
+                    output.write(trimmed.toString().getBytes(StandardCharsets.UTF_8));
+                }
+            } catch (Exception error) {
+                Log.w(TAG, "Could not archive sent queued turn", error);
+            }
+        }
+    }
+
+    private JSONArray readJsonArrayFile(File file) {
+        if (file == null || !file.exists()) {
+            return new JSONArray();
+        }
+        try (InputStream input = new FileInputStream(file);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[4096];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
+            }
+            return new JSONArray(output.toString(StandardCharsets.UTF_8.name()));
+        } catch (Exception ignored) {
+            return new JSONArray();
+        }
+    }
+
+    private File sentQueueFileForThread(String threadId) {
+        return new File(new File(getFilesDir(), "queue-history"), safeFileName(threadId) + ".json");
     }
 
     private String formatQueueInfoLabel(QueueInfo info) {

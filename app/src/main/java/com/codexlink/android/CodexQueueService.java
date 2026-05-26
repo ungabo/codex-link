@@ -198,7 +198,7 @@ public class CodexQueueService extends Service {
 
                     String turnsEndpoint = threadTurnsEndpointFor(config.endpoint, queue.threadId);
                     Log.i(TAG, "Posting queued turn for " + queue.threadId + " to " + turnsEndpoint);
-                    broadcastQueueChanged(queue.threadId, item, "Sending", "Sent to desktop. Waiting for Codex to finish.", false);
+                    broadcastQueueChanged(queue.threadId, item, "Sending", "Sending to Windows.", false);
                     HttpResult result = postJson(config, turnsEndpoint, item.payload);
                     Log.i(TAG, "Queued turn result for " + queue.threadId + ": HTTP " + result.status);
                     if (result.status == 409) {
@@ -214,10 +214,20 @@ public class CodexQueueService extends Service {
                         continue;
                     }
 
-                    removeQueuedItem(queue.threadId, item.id);
                     madeProgress = true;
-                    lastStatus = "Completed by Codex.";
-                    broadcastQueueChanged(queue.threadId, item, "Completed", lastStatus, false);
+                    String sentStage;
+                    String sentDetail;
+                    if (isProcessingResponse(result)) {
+                        sentStage = "Processing";
+                        sentDetail = "Received by Windows. Codex is still processing.";
+                    } else {
+                        sentStage = "Completed";
+                        sentDetail = "Received by Windows and completed by Codex.";
+                    }
+                    archiveSentQueuedItem(queue.threadId, item, sentStage, sentDetail);
+                    removeQueuedItem(queue.threadId, item.id);
+                    lastStatus = sentDetail;
+                    broadcastQueueChanged(queue.threadId, item, sentStage, lastStatus, false);
                     break;
                 } catch (Exception error) {
                     lastStatus = error.getMessage() == null ? "Queued send failed." : error.getMessage();
@@ -345,6 +355,23 @@ public class CodexQueueService extends Service {
         return new HttpResult(status, response);
     }
 
+    private boolean isProcessingResponse(HttpResult result) {
+        if (result == null || result.body == null || result.body.isEmpty()) {
+            return result != null && result.status == 202;
+        }
+        try {
+            JSONObject object = new JSONObject(result.body);
+            if ("processing".equalsIgnoreCase(object.optString("status", ""))) {
+                return true;
+            }
+            if (object.optBoolean("accepted", false) && !object.optBoolean("completed", true)) {
+                return true;
+            }
+        } catch (JSONException ignored) {
+        }
+        return result.status == 202;
+    }
+
     private boolean shouldRetryWithIncludedWebToken(EndpointConfig config, String endpoint, int status) {
         if (status != 401 || !config.webMode || DEFAULT_WEB_TOKEN.isEmpty() || DEFAULT_WEB_TOKEN.equals(config.token)) {
             return false;
@@ -448,6 +475,57 @@ public class CodexQueueService extends Service {
         }
     }
 
+    private void archiveSentQueuedItem(String threadId, QueueItem item, String stage, String detail) {
+        if (threadId == null || threadId.isEmpty() || item == null) {
+            return;
+        }
+        File file = sentQueueFileForThread(threadId);
+        synchronized (CodexQueueService.class) {
+            try {
+                File parent = file.getParentFile();
+                if (parent != null && !parent.exists()) {
+                    parent.mkdirs();
+                }
+                JSONArray array = readJsonArrayFile(file);
+                array.put(new JSONObject()
+                        .put("threadId", threadId)
+                        .put("id", item.id)
+                        .put("createdAt", item.createdAt)
+                        .put("sentAt", System.currentTimeMillis())
+                        .put("stage", stage == null || stage.isEmpty() ? "Sent" : stage)
+                        .put("detail", detail == null ? "" : detail)
+                        .put("payload", item.payload));
+                JSONArray trimmed = new JSONArray();
+                int start = Math.max(0, array.length() - 50);
+                for (int index = start; index < array.length(); index++) {
+                    trimmed.put(array.opt(index));
+                }
+                try (FileOutputStream output = new FileOutputStream(file, false)) {
+                    output.write(trimmed.toString().getBytes(StandardCharsets.UTF_8));
+                }
+            } catch (Exception error) {
+                Log.w(TAG, "Could not archive sent queue item " + threadId, error);
+            }
+        }
+    }
+
+    private JSONArray readJsonArrayFile(File file) {
+        if (file == null || !file.exists()) {
+            return new JSONArray();
+        }
+        try (InputStream input = new FileInputStream(file);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[4096];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
+            }
+            return new JSONArray(output.toString(StandardCharsets.UTF_8.name()));
+        } catch (Exception ignored) {
+            return new JSONArray();
+        }
+    }
+
     private JSONObject queueItemJson(QueueItem item) {
         try {
             return new JSONObject()
@@ -461,6 +539,10 @@ public class CodexQueueService extends Service {
 
     private File queueFileForThread(String threadId) {
         return new File(new File(getFilesDir(), "queues"), safeFileName(threadId) + ".json");
+    }
+
+    private File sentQueueFileForThread(String threadId) {
+        return new File(new File(getFilesDir(), "queue-history"), safeFileName(threadId) + ".json");
     }
 
     private String safeFileName(String value) {

@@ -1408,6 +1408,64 @@ def default_cwd(codex_home: Path) -> str:
     return roots[0] if roots else ""
 
 
+def is_turn_timeout_error(error: BaseException) -> bool:
+    message = str(error).lower()
+    return "turn did not complete before" in message or "timed out" in message or "timeout" in message
+
+
+def turn_processing_response(thread_id: str, activity: dict[str, Any], detail: str) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "accepted": True,
+        "completed": False,
+        "status": "processing" if activity.get("active") else "unknown",
+        "message": detail,
+        "threadId": thread_id,
+        "turnId": activity.get("activeTurnId", ""),
+        "activeStartedAt": activity.get("activeStartedAt", ""),
+        "activity": activity,
+    }
+
+
+def kill_process_tree(pid: int) -> None:
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return
+    try:
+        os.kill(pid, 9)
+    except OSError:
+        pass
+
+
+def run_phase0_command(command: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+    process = subprocess.Popen(
+        command,
+        cwd=PHASE0_DIR,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        creationflags=creationflags,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        kill_process_tree(process.pid)
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            stdout = error.output if isinstance(error.output, str) else ""
+            stderr = error.stderr if isinstance(error.stderr, str) else ""
+        raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr) from error
+
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
 class CodexLinkHandler(BaseHTTPRequestHandler):
     codex_home: Path
     token: str | None
@@ -1713,7 +1771,36 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
                 except RuntimeError:
                     checkpoint_result = None
                 result = run_codex_turn(thread_id, prompt, image_paths, turn_cwd)
+            except subprocess.TimeoutExpired as error:
+                activity = thread_activity_for_path(rollout_path, tail_only=False)
+                if activity.get("active"):
+                    self.write_json(
+                        turn_processing_response(
+                            thread_id,
+                            activity,
+                            "Request was accepted, but Codex is still processing.",
+                        ),
+                        status=202,
+                    )
+                else:
+                    self.write_json(
+                        {"error": f"Codex turn timed out before desktop reported active processing: {error}"},
+                        status=504,
+                    )
+                return
             except RuntimeError as error:
+                if is_turn_timeout_error(error):
+                    activity = thread_activity_for_path(rollout_path, tail_only=False)
+                    if activity.get("active"):
+                        self.write_json(
+                            turn_processing_response(
+                                thread_id,
+                                activity,
+                                "Request was accepted, but Codex is still processing.",
+                            ),
+                            status=202,
+                        )
+                        return
                 self.write_json({"error": str(error)}, status=500)
                 return
             finally:
@@ -1819,13 +1906,7 @@ def run_codex_turn(
             )
         command = [npm, "run", "send-turn", "--", "--payload-file", str(payload_path)]
 
-        completed = subprocess.run(
-            command,
-            cwd=PHASE0_DIR,
-            text=True,
-            capture_output=True,
-            timeout=240,
-        )
+        completed = run_phase0_command(command, timeout=240)
     finally:
         if payload_path is not None:
             try:
@@ -1899,13 +1980,7 @@ def run_codex_start_thread(cwd: str, prompt: str = "") -> dict[str, Any]:
     command = [phase0_npm(), "run", "start-thread", "--", cwd]
     if prompt:
         command.append(prompt)
-    completed = subprocess.run(
-        command,
-        cwd=PHASE0_DIR,
-        text=True,
-        capture_output=True,
-        timeout=240,
-    )
+    completed = run_phase0_command(command, timeout=240)
     result = parse_phase0_json(completed, "Codex thread start")
     return {
         "ok": True,
@@ -1919,11 +1994,8 @@ def run_codex_start_thread(cwd: str, prompt: str = "") -> dict[str, Any]:
 
 
 def run_codex_interrupt(thread_id: str, turn_id: str) -> dict[str, Any]:
-    completed = subprocess.run(
+    completed = run_phase0_command(
         [phase0_npm(), "run", "interrupt-turn", "--", thread_id, turn_id],
-        cwd=PHASE0_DIR,
-        text=True,
-        capture_output=True,
         timeout=60,
     )
     result = parse_phase0_json(completed, "Codex turn interrupt")

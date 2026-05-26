@@ -1,5 +1,6 @@
 import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
@@ -136,15 +137,16 @@ async function main(): Promise<void> {
   try {
     const version = execFileSync(config.codexPath, ["--version"], { encoding: "utf8" }).trim();
     const serverCwd = payload.cwd || config.testProjectDir;
-    appServerProcess = spawn(config.codexPath, ["app-server", "--listen", config.appServerUrl], {
+    const appServerUrl = await appServerUrlForTurn(config.appServerUrl);
+    appServerProcess = spawn(config.codexPath, ["app-server", "--listen", appServerUrl], {
       cwd: serverCwd,
       env: process.env,
     });
     appServerProcess.stdout.on("data", (chunk) => append(serverLogPath, chunk.toString()));
     appServerProcess.stderr.on("data", (chunk) => append(serverLogPath, chunk.toString()));
 
-    await waitForServer(config.appServerUrl, 15000);
-    const socket = await openSocket(config.appServerUrl);
+    await waitForServer(appServerUrl, 15000);
+    const socket = await openSocket(appServerUrl);
     const rpc = new RpcClient(socket, rawLogPath);
 
     socket.on("message", (data) => {
@@ -211,6 +213,44 @@ async function main(): Promise<void> {
       appServerProcess.kill();
     }
   }
+}
+
+async function appServerUrlForTurn(configUrl: string): Promise<string> {
+  const url = new URL(configUrl);
+  if (url.protocol !== "ws:" && url.protocol !== "wss:") {
+    return configUrl;
+  }
+  const host = loopbackHost(url.hostname);
+  const port = await freeTcpPort(host);
+  return `${url.protocol}//${host}:${port}`;
+}
+
+function loopbackHost(hostname: string): string {
+  if (!hostname || hostname === "localhost" || hostname === "::1" || hostname === "[::1]") {
+    return "127.0.0.1";
+  }
+  return hostname;
+}
+
+function freeTcpPort(host: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.unref();
+    server.on("error", reject);
+    server.listen(0, host, () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      server.close((error) => {
+        if (error) {
+          reject(error);
+        } else if (port > 0) {
+          resolve(port);
+        } else {
+          reject(new Error("Could not allocate a free app-server port"));
+        }
+      });
+    });
+  });
 }
 
 function sandboxPolicyForCwd(cwd: string): JsonObject {
