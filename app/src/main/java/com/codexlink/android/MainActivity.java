@@ -5052,7 +5052,9 @@ public class MainActivity extends Activity {
             return;
         }
         if (queuedContainsRequestId(lastRequestId)) {
-            if (currentThreadActive && !"Waiting".equalsIgnoreCase(lastRequestStage)) {
+            if (currentThreadActive
+                    && (!"Waiting".equalsIgnoreCase(lastRequestStage)
+                    || !lastRequestDetail.toLowerCase(Locale.US).contains("windows is processing"))) {
                 updateRequestStatusPill(
                         "Waiting",
                         lastRequestSummary,

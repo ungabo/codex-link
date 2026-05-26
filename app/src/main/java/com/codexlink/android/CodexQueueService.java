@@ -26,9 +26,13 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Date;
 import java.util.Locale;
+import java.util.TimeZone;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -297,13 +301,36 @@ public class CodexQueueService extends Service {
         StringBuilder builder = new StringBuilder();
         builder.append("Windows is processing this chat.");
         if (state != null && !state.activeStartedAt.isEmpty()) {
-            builder.append(" Active since ").append(state.activeStartedAt).append(".");
-        }
-        if (state != null && state.activeCount > 1) {
-            builder.append(" ").append(state.activeCount).append(" active turns are reported.");
+            builder.append(" Processing since ").append(formatIsoForStatus(state.activeStartedAt)).append(".");
         }
         builder.append(" Queue will retry when it finishes.");
         return builder.toString();
+    }
+
+    private String formatIsoForStatus(String isoTimestamp) {
+        if (isoTimestamp == null || isoTimestamp.trim().isEmpty()) {
+            return "";
+        }
+        String clean = isoTimestamp.trim();
+        String[] patterns = {
+                "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+                "yyyy-MM-dd'T'HH:mm:ss'Z'"
+        };
+        for (String pattern : patterns) {
+            try {
+                SimpleDateFormat parser = new SimpleDateFormat(pattern, Locale.US);
+                parser.setTimeZone(TimeZone.getTimeZone("UTC"));
+                Date date = parser.parse(clean);
+                if (date == null) {
+                    continue;
+                }
+                SimpleDateFormat output = new SimpleDateFormat("MMM d, h:mm a", Locale.US);
+                output.setTimeZone(TimeZone.getDefault());
+                return output.format(date);
+            } catch (ParseException ignored) {
+            }
+        }
+        return clean;
     }
 
     private EndpointConfig endpointConfig() {
