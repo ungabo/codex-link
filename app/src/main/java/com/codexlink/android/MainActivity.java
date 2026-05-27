@@ -87,6 +87,10 @@ public class MainActivity extends Activity {
     private static final String PREF_LAST_INSTALL_NOTIFICATION_VERSION = "last_install_notification_version";
     private static final String PREF_QUEUE_PAUSED = "queue_paused";
     private static final String PREF_QUEUE_STALLED_DETAIL = "queue_stalled_detail";
+    private static final String PREF_FOREGROUND_ACTIVE = "foreground_active";
+    private static final String PREF_FOREGROUND_THREAD_ID = "foreground_thread_id";
+    static final String EXTRA_OPEN_THREAD_ID = "codex_link_thread_id";
+    static final String EXTRA_OPEN_THREAD_TITLE = "codex_link_thread_title";
     private static final String MODE_LOCAL = "local";
     private static final String MODE_WEB = "web";
     private static final String DEFAULT_WEB_ENDPOINT = "https://www.sitesindevelopment.com/codex-link/index.php/link";
@@ -222,6 +226,7 @@ public class MainActivity extends Activity {
     private boolean currentThreadFullLoaded = false;
     private boolean applyingConnectionMode = false;
     private boolean connectionExpanded = false;
+    private boolean activityForeground = false;
     private boolean queueReceiverRegistered = false;
     private boolean queueResumePromptShown = false;
     private boolean lastRequestIsError = false;
@@ -360,17 +365,23 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        activityForeground = true;
+        updateForegroundThreadState();
         recoverAfterForegroundReturn();
     }
 
     @Override
     protected void onPause() {
+        activityForeground = false;
+        updateForegroundThreadState();
         saveActiveThreadState();
         super.onPause();
     }
 
     @Override
     protected void onStop() {
+        activityForeground = false;
+        updateForegroundThreadState();
         saveActiveThreadState();
         unregisterQueueReceiver();
         super.onStop();
@@ -1268,6 +1279,28 @@ public class MainActivity extends Activity {
             preferences.edit().putString(PREF_ACTIVE_THREAD_STATE, state.toString()).apply();
         } catch (JSONException ignored) {
         }
+    }
+
+    private void updateForegroundThreadState() {
+        if (preferences == null) {
+            return;
+        }
+        boolean viewingThread = activityForeground && currentThreadId != null && !currentThreadId.isEmpty();
+        SharedPreferences.Editor editor = preferences.edit()
+                .putBoolean(PREF_FOREGROUND_ACTIVE, viewingThread);
+        if (viewingThread) {
+            editor.putString(PREF_FOREGROUND_THREAD_ID, currentThreadId);
+        } else {
+            editor.remove(PREF_FOREGROUND_THREAD_ID);
+        }
+        editor.apply();
+    }
+
+    private void maybeNotifyThreadCompleted(boolean wasProcessing, boolean isProcessing) {
+        if (!wasProcessing || isProcessing || currentThreadId == null || currentThreadId.isEmpty()) {
+            return;
+        }
+        NotificationHelper.showTurnCompletedNotification(this, currentThreadId, currentThreadTitle);
     }
 
     private void clearActiveThreadState() {
@@ -2366,50 +2399,177 @@ public class MainActivity extends Activity {
     }
 
     private void renderLiveOutputPanel() {
-        if ((!currentThreadActive && !currentThreadStaleActive) || loadedLiveEvents == null || loadedLiveEvents.length() == 0) {
+        if (loadedLiveEvents == null || loadedLiveEvents.length() == 0) {
             return;
         }
 
+        boolean running = currentThreadActive || currentThreadStaleActive || isSendingThreadTurn;
+        boolean expanded = running || liveOutputExpanded;
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(12), dp(10), dp(12), dp(10));
-        panel.setBackground(outlineDrawable(Color.rgb(250, 248, 240), Color.rgb(216, 197, 139), dp(8)));
+        panel.setBackground(outlineDrawable(
+                running ? Color.rgb(250, 248, 240) : Color.rgb(252, 251, 248),
+                running ? Color.rgb(216, 197, 139) : COLOR_BORDER,
+                dp(8)));
 
-        TextView title = text("Live output", 13, COLOR_INK, Typeface.BOLD);
-        panel.addView(title);
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
 
-        int start = Math.max(0, loadedLiveEvents.length() - 10);
-        StringBuilder builder = new StringBuilder();
-        for (int index = start; index < loadedLiveEvents.length(); index++) {
+        LinearLayout titleStack = new LinearLayout(this);
+        titleStack.setOrientation(LinearLayout.VERTICAL);
+        TextView title = text(running ? "Live output" : "Run output", 13, COLOR_INK, Typeface.BOLD);
+        titleStack.addView(title, matchWrap());
+        TextView summary = text(liveOutputSummary(running), 11, COLOR_MUTED, Typeface.NORMAL);
+        summary.setSingleLine(true);
+        summary.setEllipsize(TextUtils.TruncateAt.END);
+        titleStack.addView(summary, matchWrap());
+        header.addView(titleStack, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        if (!running) {
+            Button toggleButton = toolbarButton(expanded ? "Hide" : "Show", Color.WHITE, COLOR_PRIMARY);
+            toggleButton.setOnClickListener(view -> {
+                liveOutputExpanded = !liveOutputExpanded;
+                rerenderCurrentThreadMessages();
+            });
+            header.addView(toggleButton, new LinearLayout.LayoutParams(dp(72), dp(32)));
+        }
+        panel.addView(header, matchWrap());
+
+        StringBuilder searchable = new StringBuilder();
+        for (int index = 0; index < loadedLiveEvents.length(); index++) {
             JSONObject event = loadedLiveEvents.optJSONObject(index);
             if (event == null) {
                 continue;
             }
-            String time = formatEventTime(event.optString("timestamp", ""));
-            String eventTitle = event.optString("title", "Update");
-            String detail = event.optString("detail", "");
-            if (builder.length() > 0) {
-                builder.append("\n\n");
-            }
-            if (!time.isEmpty()) {
-                builder.append(time).append("  ");
-            }
-            builder.append(eventTitle);
-            if (!detail.isEmpty()) {
-                builder.append("\n").append(detail);
-            }
+            searchable.append(liveEventDisplayTitle(event))
+                    .append('\n')
+                    .append(formatLiveEventDetail(event.optString("detail", "")))
+                    .append('\n');
         }
 
-        TextView body = text(builder.toString(), 12, COLOR_INK, Typeface.NORMAL);
-        body.setTypeface(Typeface.MONOSPACE);
-        body.setLineSpacing(dp(2), 1.0f);
-        body.setPadding(0, dp(8), 0, 0);
-        body.setTextIsSelectable(true);
-        panel.addView(body, matchWrap());
+        if (expanded) {
+            int visibleCount = running ? 12 : 18;
+            int start = Math.max(0, loadedLiveEvents.length() - visibleCount);
+            if (start > 0) {
+                TextView hidden = text(start + " older events hidden", 11, COLOR_MUTED, Typeface.NORMAL);
+                hidden.setPadding(0, dp(8), 0, 0);
+                panel.addView(hidden, matchWrap());
+            }
+            for (int index = start; index < loadedLiveEvents.length(); index++) {
+                JSONObject event = loadedLiveEvents.optJSONObject(index);
+                if (event != null) {
+                    addLiveOutputEventRow(panel, event);
+                }
+            }
+        } else {
+            TextView preview = text(lastLiveEventSummary(), 11, COLOR_MUTED, Typeface.NORMAL);
+            preview.setMaxLines(2);
+            preview.setEllipsize(TextUtils.TruncateAt.END);
+            preview.setPadding(0, dp(8), 0, 0);
+            panel.addView(preview, matchWrap());
+            panel.setClickable(true);
+            panel.setOnClickListener(view -> {
+                liveOutputExpanded = true;
+                rerenderCurrentThreadMessages();
+            });
+        }
 
         messageListLayout.addView(panel, matchWrap());
         renderedMessageViews.add(panel);
-        renderedMessageTexts.add(("live output\n" + builder).toLowerCase(Locale.US));
+        renderedMessageTexts.add(("live output\n" + searchable).toLowerCase(Locale.US));
+    }
+
+    private String liveOutputSummary(boolean running) {
+        JSONObject last = loadedLiveEvents.optJSONObject(Math.max(0, loadedLiveEvents.length() - 1));
+        String time = last == null ? "" : formatEventTime(last.optString("timestamp", ""));
+        StringBuilder builder = new StringBuilder();
+        builder.append(running ? "Running" : "Complete")
+                .append(" - ")
+                .append(loadedLiveEvents.length())
+                .append(loadedLiveEvents.length() == 1 ? " event" : " events");
+        if (!time.isEmpty()) {
+            builder.append(" - ").append(time);
+        }
+        return builder.toString();
+    }
+
+    private String lastLiveEventSummary() {
+        JSONObject last = loadedLiveEvents.optJSONObject(Math.max(0, loadedLiveEvents.length() - 1));
+        if (last == null) {
+            return "";
+        }
+        String detail = formatLiveEventDetail(last.optString("detail", ""));
+        String summary = liveEventDisplayTitle(last);
+        if (!detail.isEmpty()) {
+            summary += ": " + detail.replace('\n', ' ');
+        }
+        return truncateMessageBody(summary, 220).replace("\n\n...", "...");
+    }
+
+    private void addLiveOutputEventRow(LinearLayout panel, JSONObject event) {
+        String time = formatEventTime(event.optString("timestamp", ""));
+        String title = liveEventDisplayTitle(event);
+        String heading = time.isEmpty() ? title : time + " - " + title;
+        TextView headingView = text(heading, 11, liveEventTitleColor(event), Typeface.BOLD);
+        headingView.setPadding(0, dp(8), 0, 0);
+        panel.addView(headingView, matchWrap());
+
+        String detail = formatLiveEventDetail(event.optString("detail", ""));
+        if (detail.isEmpty()) {
+            return;
+        }
+        TextView detailView = text(detail, 11, COLOR_INK, Typeface.NORMAL);
+        if ("tool".equalsIgnoreCase(event.optString("kind", ""))) {
+            detailView.setTypeface(Typeface.MONOSPACE);
+        }
+        detailView.setTextIsSelectable(true);
+        detailView.setLineSpacing(dp(1), 1.0f);
+        detailView.setPadding(dp(8), dp(3), 0, 0);
+        panel.addView(detailView, matchWrap());
+    }
+
+    private int liveEventTitleColor(JSONObject event) {
+        String title = event.optString("title", "").toLowerCase(Locale.US);
+        if (title.contains("failed") || title.contains("cancel")) {
+            return COLOR_ACCENT;
+        }
+        if (title.contains("complete")) {
+            return COLOR_PRIMARY;
+        }
+        return COLOR_MUTED;
+    }
+
+    private String liveEventDisplayTitle(JSONObject event) {
+        String title = event.optString("title", "Update").trim();
+        String lower = title.toLowerCase(Locale.US);
+        if (lower.equals("tool output")) {
+            return "Output";
+        }
+        if (lower.startsWith("tool call: shell_command")) {
+            return "Command";
+        }
+        if (lower.startsWith("tool call:")) {
+            return "Tool: " + title.substring("Tool call:".length()).trim();
+        }
+        return title.isEmpty() ? "Update" : title;
+    }
+
+    private String formatLiveEventDetail(String detail) {
+        if (detail == null || detail.trim().isEmpty()) {
+            return "";
+        }
+        String clean = detail.replace("\r\n", "\n").replace('\r', '\n').trim();
+        try {
+            if (clean.startsWith("{") && clean.endsWith("}")) {
+                clean = new JSONObject(clean).toString(2);
+            } else if (clean.startsWith("[") && clean.endsWith("]")) {
+                clean = new JSONArray(clean).toString(2);
+            }
+        } catch (JSONException ignored) {
+        }
+        return truncateMessageBody(clean, 1200).trim();
     }
 
     private String formatEventTime(String timestamp) {
