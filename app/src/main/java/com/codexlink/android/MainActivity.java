@@ -2583,9 +2583,6 @@ public class MainActivity extends Activity {
             setThreadTurnStatus(processingStatusText(), false);
         }
         if (threadActionsExpanded) {
-            threadControlsLayout.addView(buildThreadNavigationRow(), matchWrap());
-            threadControlsLayout.addView(buildThreadActionRow(), matchWrap());
-            threadControlsLayout.addView(buildProjectActionRow(), matchWrap());
             threadControlsLayout.addView(buildThreadSearchRow(), matchWrap());
         }
     }
@@ -2619,7 +2616,7 @@ public class MainActivity extends Activity {
 
         row.addView(spacer(dp(3)));
 
-        Button actionsButton = toolbarButton(threadActionsExpanded ? "×" : "⋯", Color.WHITE, COLOR_PRIMARY);
+        Button actionsButton = toolbarButton(threadActionsExpanded ? "X" : "\uD83D\uDD0D", Color.WHITE, COLOR_PRIMARY);
         actionsButton.setTextSize(18);
         actionsButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
         actionsButton.setOnClickListener(view -> {
