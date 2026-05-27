@@ -100,6 +100,7 @@ public class MainActivity extends Activity {
     private static final String STATE_THREAD_SEARCH = "thread_search";
     private static final String STATE_THREAD_MESSAGES = "thread_messages";
     private static final String STATE_LIVE_EVENTS = "live_events";
+    private static final String STATE_LIVE_OUTPUT_EXPANDED = "live_output_expanded";
     private static final String STATE_DRAFT = "draft";
     private static final String STATE_SELECTED_IMAGE_URI = "selected_image_uri";
     private static final String STATE_SELECTED_IMAGE_NAME = "selected_image_name";
@@ -216,6 +217,7 @@ public class MainActivity extends Activity {
     private boolean isPollingThread = false;
     private boolean hasLoadedCatalog = false;
     private boolean threadActionsExpanded = false;
+    private boolean liveOutputExpanded = false;
     private boolean queuedTurnsExpanded = false;
     private boolean currentThreadFullLoaded = false;
     private boolean applyingConnectionMode = false;
@@ -406,6 +408,7 @@ public class MainActivity extends Activity {
         outState.putBoolean(STATE_THREAD_ACTIVE, currentThreadActive);
         outState.putBoolean(STATE_THREAD_STALE_ACTIVE, currentThreadStaleActive);
         outState.putBoolean(STATE_ACTIONS_EXPANDED, threadActionsExpanded);
+        outState.putBoolean(STATE_LIVE_OUTPUT_EXPANDED, liveOutputExpanded);
         outState.putBoolean(STATE_QUEUE_EXPANDED, queuedTurnsExpanded);
         outState.putBoolean(STATE_FULL_LOADED, currentThreadFullLoaded);
     }
@@ -1120,6 +1123,7 @@ public class MainActivity extends Activity {
         currentThreadActive = state.getBoolean(STATE_THREAD_ACTIVE, false);
         currentThreadStaleActive = state.getBoolean(STATE_THREAD_STALE_ACTIVE, false);
         threadActionsExpanded = state.getBoolean(STATE_ACTIONS_EXPANDED, false);
+        liveOutputExpanded = state.getBoolean(STATE_LIVE_OUTPUT_EXPANDED, false);
         queuedTurnsExpanded = state.getBoolean(STATE_QUEUE_EXPANDED, false);
         currentThreadFullLoaded = state.getBoolean(STATE_FULL_LOADED, false);
 
@@ -1198,6 +1202,7 @@ public class MainActivity extends Activity {
             currentThreadStaleActive = state.optBoolean(STATE_THREAD_STALE_ACTIVE, false);
             currentThreadFullLoaded = state.optBoolean(STATE_FULL_LOADED, false);
             threadActionsExpanded = state.optBoolean(STATE_ACTIONS_EXPANDED, false);
+            liveOutputExpanded = state.optBoolean(STATE_LIVE_OUTPUT_EXPANDED, false);
             queuedTurnsExpanded = state.optBoolean(STATE_QUEUE_EXPANDED, false);
 
             String draft = state.optString(STATE_DRAFT, "");
@@ -1257,6 +1262,7 @@ public class MainActivity extends Activity {
                     .put(STATE_SELECTED_IMAGE_MIME, selectedImageMimeType)
                     .put(STATE_EDITING_IMAGES, editingQueuedImages == null ? "" : editingQueuedImages.toString())
                     .put(STATE_ACTIONS_EXPANDED, threadActionsExpanded)
+                    .put(STATE_LIVE_OUTPUT_EXPANDED, liveOutputExpanded)
                     .put(STATE_QUEUE_EXPANDED, queuedTurnsExpanded)
                     .put(STATE_FULL_LOADED, currentThreadFullLoaded);
             preferences.edit().putString(PREF_ACTIVE_THREAD_STATE, state.toString()).apply();
@@ -2011,6 +2017,7 @@ public class MainActivity extends Activity {
             unloadThreadQueue();
             stopThreadPoll();
             threadActionsExpanded = false;
+            liveOutputExpanded = false;
             currentThreadFullLoaded = false;
         }
         loadThreadPage(threadId, title, null, false, false);
@@ -2149,6 +2156,7 @@ public class MainActivity extends Activity {
         int previousHeight = messageListLayout.getHeight();
         int previousScrollY = rootScrollView.getScrollY();
         int previousRangeEnd = loadedRangeEnd;
+        boolean wasProcessing = currentThreadActive || currentThreadStaleActive || isSendingThreadTurn;
         boolean promptFocused = threadPromptInput != null && threadPromptInput.hasFocus();
         int promptSelection = promptFocused ? Math.max(0, threadPromptInput.getSelectionStart()) : 0;
         boolean wasNearBottom = isNearThreadBottom();
@@ -2182,6 +2190,12 @@ public class MainActivity extends Activity {
                 ? prependMessages(messages, loadedThreadMessages)
                 : copyMessages(messages);
         loadedLiveEvents = copyMessages(liveEvents);
+        boolean isProcessing = currentThreadActive || currentThreadStaleActive || isSendingThreadTurn;
+        if (isProcessing) {
+            liveOutputExpanded = true;
+        } else if (wasProcessing) {
+            liveOutputExpanded = false;
+        }
         lastRenderedThreadSignature = threadResponseSignature(response);
 
         renderThreadMessages(endpoint);
@@ -3426,6 +3440,7 @@ public class MainActivity extends Activity {
         currentThreadActive = false;
         currentThreadStaleActive = false;
         threadActionsExpanded = false;
+        liveOutputExpanded = false;
         queuedTurnsExpanded = false;
         currentThreadFullLoaded = false;
         sendingThreadPayload = null;
