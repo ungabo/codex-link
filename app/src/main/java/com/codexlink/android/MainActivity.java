@@ -99,6 +99,7 @@ public class MainActivity extends Activity {
     private static final String STATE_THREAD_STALE_REASON = "thread_stale_reason";
     private static final String STATE_THREAD_SEARCH = "thread_search";
     private static final String STATE_THREAD_MESSAGES = "thread_messages";
+    private static final String STATE_LIVE_EVENTS = "live_events";
     private static final String STATE_DRAFT = "draft";
     private static final String STATE_SELECTED_IMAGE_URI = "selected_image_uri";
     private static final String STATE_SELECTED_IMAGE_NAME = "selected_image_name";
@@ -225,6 +226,8 @@ public class MainActivity extends Activity {
     private int loadedCatalogChatCount = 0;
     private JSONArray loadedCatalogChats = new JSONArray();
     private JSONArray loadedThreadMessages = new JSONArray();
+    private JSONArray loadedLiveEvents = new JSONArray();
+    private String lastRenderedThreadSignature = "";
     private final ArrayList<QueuedTurn> queuedThreadTurns = new ArrayList<>();
     private final ArrayList<View> renderedMessageViews = new ArrayList<>();
     private final ArrayList<String> renderedMessageTexts = new ArrayList<>();
@@ -389,6 +392,7 @@ public class MainActivity extends Activity {
         outState.putString(STATE_THREAD_STALE_REASON, currentThreadStaleReason);
         outState.putString(STATE_THREAD_SEARCH, currentThreadSearchQuery);
         outState.putString(STATE_THREAD_MESSAGES, loadedThreadMessages.toString());
+        outState.putString(STATE_LIVE_EVENTS, loadedLiveEvents.toString());
         outState.putString(STATE_DRAFT, threadPromptInput == null ? "" : threadPromptInput.getText().toString());
         outState.putString(STATE_SELECTED_IMAGE_URI, selectedImageUri == null ? "" : selectedImageUri.toString());
         outState.putString(STATE_SELECTED_IMAGE_NAME, selectedImageName);
@@ -1125,6 +1129,14 @@ public class MainActivity extends Activity {
                 loadedThreadMessages = new JSONArray(messages);
             } catch (JSONException ignored) {
                 loadedThreadMessages = new JSONArray();
+            }
+        }
+        String liveEvents = state.getString(STATE_LIVE_EVENTS, "");
+        if (!liveEvents.isEmpty()) {
+            try {
+                loadedLiveEvents = new JSONArray(liveEvents);
+            } catch (JSONException ignored) {
+                loadedLiveEvents = new JSONArray();
             }
         }
 
@@ -2133,6 +2145,7 @@ public class MainActivity extends Activity {
     private void renderThreadPage(String endpoint, JSONObject response, boolean prepend, boolean full) {
         JSONObject thread = response.optJSONObject("thread");
         JSONArray messages = response.optJSONArray("messages");
+        JSONArray liveEvents = response.optJSONArray("liveEvents");
         int previousHeight = messageListLayout.getHeight();
         int previousScrollY = rootScrollView.getScrollY();
         int previousRangeEnd = loadedRangeEnd;
@@ -2168,6 +2181,8 @@ public class MainActivity extends Activity {
         loadedThreadMessages = prepend
                 ? prependMessages(messages, loadedThreadMessages)
                 : copyMessages(messages);
+        loadedLiveEvents = copyMessages(liveEvents);
+        lastRenderedThreadSignature = threadResponseSignature(response);
 
         renderThreadMessages(endpoint);
         if (currentThreadActive) {
@@ -2213,8 +2228,43 @@ public class MainActivity extends Activity {
     private void renderThreadMessages(String endpoint) {
         messageListLayout.removeAllViews();
         renderMergedMessages(endpoint);
+        renderLiveOutputPanel();
         renderInlinePendingTurns(endpoint);
         updateThreadSearchMatches();
+    }
+
+    private String threadResponseSignature(JSONObject response) {
+        if (response == null) {
+            return "";
+        }
+        StringBuilder builder = new StringBuilder();
+        JSONObject thread = response.optJSONObject("thread");
+        JSONObject activity = response.optJSONObject("activity");
+        if (thread != null) {
+            builder.append(thread.optString("id", "")).append('|')
+                    .append(thread.optString("status", "")).append('|')
+                    .append(thread.optBoolean("active")).append('|')
+                    .append(thread.optBoolean("staleActive")).append('|')
+                    .append(thread.optString("activeTurnId", "")).append('|')
+                    .append(thread.optString("activeStartedAt", "")).append('|');
+        }
+        if (activity != null) {
+            builder.append(activity.optString("lastEventAt", "")).append('|');
+        }
+        builder.append(response.optInt("rangeStart", 0)).append('|')
+                .append(response.optInt("rangeEnd", 0)).append('|')
+                .append(response.optInt("totalMessageCount", 0)).append('|')
+                .append(response.optBoolean("hasMoreBefore", false)).append('|');
+        JSONArray messages = response.optJSONArray("messages");
+        if (messages != null) {
+            builder.append(messages.toString());
+        }
+        builder.append('|');
+        JSONArray liveEvents = response.optJSONArray("liveEvents");
+        if (liveEvents != null) {
+            builder.append(liveEvents.toString());
+        }
+        return builder.toString();
     }
 
     private void rerenderCurrentThreadMessages() {
@@ -2298,6 +2348,70 @@ public class MainActivity extends Activity {
         for (QueuedTurn turn : new ArrayList<>(queuedThreadTurns)) {
             String status = samePayload(turn.payload, sendingThreadPayload) ? "Sending queued" : "Queued";
             addRenderedPendingMessage(endpoint, turn.payload, status);
+        }
+    }
+
+    private void renderLiveOutputPanel() {
+        if ((!currentThreadActive && !currentThreadStaleActive) || loadedLiveEvents == null || loadedLiveEvents.length() == 0) {
+            return;
+        }
+
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(12), dp(10), dp(12), dp(10));
+        panel.setBackground(outlineDrawable(Color.rgb(250, 248, 240), Color.rgb(216, 197, 139), dp(8)));
+
+        TextView title = text("Live output", 13, COLOR_INK, Typeface.BOLD);
+        panel.addView(title);
+
+        int start = Math.max(0, loadedLiveEvents.length() - 18);
+        StringBuilder builder = new StringBuilder();
+        for (int index = start; index < loadedLiveEvents.length(); index++) {
+            JSONObject event = loadedLiveEvents.optJSONObject(index);
+            if (event == null) {
+                continue;
+            }
+            String time = formatEventTime(event.optString("timestamp", ""));
+            String eventTitle = event.optString("title", "Update");
+            String detail = event.optString("detail", "");
+            if (builder.length() > 0) {
+                builder.append("\n\n");
+            }
+            if (!time.isEmpty()) {
+                builder.append(time).append("  ");
+            }
+            builder.append(eventTitle);
+            if (!detail.isEmpty()) {
+                builder.append("\n").append(detail);
+            }
+        }
+
+        TextView body = text(builder.toString(), 12, COLOR_INK, Typeface.NORMAL);
+        body.setTypeface(Typeface.MONOSPACE);
+        body.setLineSpacing(dp(2), 1.0f);
+        body.setPadding(0, dp(8), 0, 0);
+        body.setTextIsSelectable(true);
+        panel.addView(body, matchWrap());
+
+        messageListLayout.addView(panel, matchWrap());
+        renderedMessageViews.add(panel);
+        renderedMessageTexts.add(("live output\n" + builder).toLowerCase(Locale.US));
+    }
+
+    private String formatEventTime(String timestamp) {
+        if (timestamp == null || timestamp.length() < 19) {
+            return "";
+        }
+        try {
+            String clean = timestamp.replace("Z", "+0000");
+            if (clean.length() >= 24 && clean.charAt(clean.length() - 3) == ':') {
+                clean = clean.substring(0, clean.length() - 3) + clean.substring(clean.length() - 2);
+            }
+            SimpleDateFormat input = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.US);
+            Date parsed = input.parse(clean);
+            return parsed == null ? "" : timeFormat.format(parsed);
+        } catch (Exception ignored) {
+            return "";
         }
     }
 
@@ -3319,6 +3433,8 @@ public class MainActivity extends Activity {
         currentThreadFullLoaded = false;
         sendingThreadPayload = null;
         loadedThreadMessages = new JSONArray();
+        loadedLiveEvents = new JSONArray();
+        lastRenderedThreadSignature = "";
         currentThreadSearchQuery = "";
         currentThreadSearchMatch = -1;
         threadSearchMatches.clear();
@@ -4733,9 +4849,15 @@ public class MainActivity extends Activity {
                 String threadEndpoint = threadEndpointFor(endpoint, threadId, before, false);
                 String body = getCatalog(threadEndpoint, token);
                 JSONObject response = new JSONObject(body);
+                String signature = threadResponseSignature(response);
                 mainHandler.post(() -> {
                     isPollingThread = false;
                     if (!threadId.equals(currentThreadId)) {
+                        return;
+                    }
+                    if (signature.equals(lastRenderedThreadSignature)) {
+                        maybeRunQueuedTurnSoon();
+                        scheduleThreadPoll();
                         return;
                     }
                     renderThreadPage(endpoint, response, false, false);

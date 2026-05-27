@@ -33,6 +33,9 @@ MAX_UPLOAD_IMAGES = 4
 ACTIVE_TURN_STALE_SECONDS = 30 * 60
 ACTIVE_TURN_QUIET_STALE_SECONDS = 8 * 60
 ACTIVITY_TAIL_BYTES = 512 * 1024
+LIVE_EVENT_TAIL_BYTES = 768 * 1024
+MAX_LIVE_EVENTS = 80
+MAX_LIVE_EVENT_TEXT = 1800
 UPLOAD_ROOT = PROJECT_ROOT / "desktop_bridge" / "uploaded_images"
 CHECKPOINTS_PATH = PROJECT_ROOT / "desktop_bridge" / "checkpoints.json"
 PROJECT_MAPPINGS_PATH = PROJECT_ROOT / "desktop_bridge" / "project_mappings.json"
@@ -628,6 +631,138 @@ def collect_message_text(content: Any) -> str:
     return "\n\n".join(parts).strip()
 
 
+def compact_live_text(value: Any, max_chars: int = MAX_LIVE_EVENT_TEXT) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = json.dumps(value, ensure_ascii=False)
+    text = re.sub(r"\s+", " ", value.replace("\r", " ").replace("\n", " ")).strip()
+    if len(text) > max_chars:
+        return text[: max_chars - 3].rstrip() + "..."
+    return text
+
+
+def shell_command_summary(arguments: Any) -> str:
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            return compact_live_text(arguments)
+    if not isinstance(arguments, dict):
+        return compact_live_text(arguments)
+    command = str(arguments.get("command") or "").strip()
+    if command:
+        return compact_live_text(command, 360)
+    return compact_live_text(arguments, 360)
+
+
+def live_event_record(
+    timestamp: str,
+    kind: str,
+    title: str,
+    detail: str = "",
+    *,
+    turn_id: str = "",
+) -> dict[str, Any]:
+    return {
+        "timestamp": timestamp,
+        "kind": kind,
+        "title": title,
+        "detail": compact_live_text(detail),
+        "turnId": turn_id,
+    }
+
+
+def summarize_live_event(event: dict[str, Any]) -> dict[str, Any] | None:
+    timestamp = str(event.get("timestamp") or "")
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return None
+
+    event_type = str(payload.get("type") or "")
+    if event.get("type") == "event_msg":
+        turn_id = str(payload.get("turn_id") or "")
+        if event_type == "task_started":
+            return live_event_record(timestamp, "task", "Task started", "Codex started processing.", turn_id=turn_id)
+        if event_type in {"task_complete", "task_failed", "task_cancelled", "task_canceled"}:
+            detail = payload.get("last_agent_message") or payload.get("error") or event_type.replace("_", " ")
+            return live_event_record(timestamp, "task", event_type.replace("_", " ").title(), detail, turn_id=turn_id)
+        if event_type == "agent_message":
+            phase = str(payload.get("phase") or "update").replace("_", " ")
+            return live_event_record(timestamp, "message", "Codex " + phase, str(payload.get("message") or ""))
+        if event_type == "user_message":
+            return live_event_record(timestamp, "message", "User message received", str(payload.get("message") or ""))
+        if event_type == "token_count":
+            info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+            last = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else {}
+            total = last.get("total_tokens")
+            detail = f"Last update used {total} tokens." if total else "Token usage updated."
+            return live_event_record(timestamp, "status", "Token usage", detail)
+        if event_type:
+            return live_event_record(timestamp, "event", event_type.replace("_", " ").title(), payload)
+        return None
+
+    if event.get("type") == "response_item":
+        item_type = str(payload.get("type") or "")
+        if item_type == "function_call":
+            name = str(payload.get("name") or "tool")
+            detail = shell_command_summary(payload.get("arguments"))
+            return live_event_record(timestamp, "tool", "Tool call: " + name, detail)
+        if item_type == "function_call_output":
+            output = str(payload.get("output") or "")
+            return live_event_record(timestamp, "tool", "Tool output", output)
+        if item_type == "reasoning":
+            summary = payload.get("summary")
+            detail = compact_live_text(summary) if summary else ""
+            return live_event_record(timestamp, "reasoning", "Reasoning update", detail)
+        return None
+
+    if event.get("type") == "turn_context":
+        return live_event_record(timestamp, "status", "Turn context loaded", payload.get("cwd") or "")
+
+    return None
+
+
+def collect_thread_live_events(rollout_path: Path, active_turn_id: str = "") -> list[dict[str, Any]]:
+    if not rollout_path.exists():
+        return []
+
+    raw_events: list[dict[str, Any]] = []
+    for line in iter_recent_jsonl(rollout_path, LIVE_EVENT_TAIL_BYTES):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            raw_events.append(event)
+
+    start_index = 0
+    if active_turn_id:
+        for index, event in enumerate(raw_events):
+            payload = event.get("payload")
+            if (
+                event.get("type") == "event_msg"
+                and isinstance(payload, dict)
+                and payload.get("type") == "task_started"
+                and str(payload.get("turn_id") or "") == active_turn_id
+            ):
+                start_index = index
+
+    if start_index == 0:
+        for index, event in enumerate(raw_events):
+            payload = event.get("payload")
+            if event.get("type") == "event_msg" and isinstance(payload, dict) and payload.get("type") == "task_started":
+                start_index = index
+
+    live_events: list[dict[str, Any]] = []
+    for event in raw_events[start_index:]:
+        record = summarize_live_event(event)
+        if record is not None and (record.get("detail") or record.get("title")):
+            live_events.append(record)
+
+    return live_events[-MAX_LIVE_EVENTS:]
+
+
 def media_id_for(path: str) -> str:
     return hashlib.sha256(path_key(path).encode("utf-8")).hexdigest()[:24]
 
@@ -772,6 +907,7 @@ def read_thread(
     updated_ms = row["updated_at_ms"] or (row["updated_at"] * 1000 if row["updated_at"] else None)
     rollout_path = Path(clean_windows_path(row["rollout_path"]))
     activity = thread_activity_for_path(rollout_path, tail_only=False)
+    live_events = collect_thread_live_events(rollout_path, str(activity.get("activeTurnId") or ""))
     messages = collect_thread_messages(rollout_path, thread_id)
     total_count = len(messages)
     session_name = load_session_index_names(codex_home).get(thread_id)
@@ -821,6 +957,7 @@ def read_thread(
         "rangeEnd": range_end,
         "hasMoreBefore": range_start > 0,
         "messages": selected_messages,
+        "liveEvents": live_events,
     }
 
 
