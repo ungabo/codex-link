@@ -85,6 +85,8 @@ public class MainActivity extends Activity {
     private static final String PREF_ACTIVE_THREAD_STATE = "active_thread_state";
     private static final String PREF_REQUEST_STATUS_PREFIX = "request_status_";
     private static final String PREF_LAST_INSTALL_NOTIFICATION_VERSION = "last_install_notification_version";
+    private static final String PREF_QUEUE_PAUSED = "queue_paused";
+    private static final String PREF_QUEUE_STALLED_DETAIL = "queue_stalled_detail";
     private static final String MODE_LOCAL = "local";
     private static final String MODE_WEB = "web";
     private static final String DEFAULT_WEB_ENDPOINT = "https://www.sitesindevelopment.com/codex-link/index.php/link";
@@ -218,6 +220,7 @@ public class MainActivity extends Activity {
     private boolean applyingConnectionMode = false;
     private boolean connectionExpanded = false;
     private boolean queueReceiverRegistered = false;
+    private boolean queueResumePromptShown = false;
     private boolean lastRequestIsError = false;
     private int loadedCatalogChatCount = 0;
     private JSONArray loadedCatalogChats = new JSONArray();
@@ -540,7 +543,7 @@ public class MainActivity extends Activity {
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(16), dp(34), dp(16), dp(22));
+        root.setPadding(dp(16), dp(34), dp(16), dp(22) + navigationBarPadding());
         rootScrollView.addView(root, new ScrollView.LayoutParams(
                 ScrollView.LayoutParams.MATCH_PARENT,
                 ScrollView.LayoutParams.WRAP_CONTENT));
@@ -585,7 +588,7 @@ public class MainActivity extends Activity {
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.BOTTOM | Gravity.END);
-        jumpParams.setMargins(0, 0, dp(14), dp(18));
+        jumpParams.setMargins(0, 0, dp(14), dp(18) + navigationBarPadding());
         shell.addView(jumpOverlay, jumpParams);
 
         return shell;
@@ -1064,6 +1067,14 @@ public class MainActivity extends Activity {
 
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private int navigationBarPadding() {
+        int resourceId = getResources().getIdentifier("navigation_bar_height", "dimen", "android");
+        if (resourceId <= 0) {
+            return dp(18);
+        }
+        return Math.max(dp(18), getResources().getDimensionPixelSize(resourceId));
     }
 
     private void restoreSavedState() {
@@ -3713,6 +3724,13 @@ public class MainActivity extends Activity {
         if (allQueueInfo().isEmpty()) {
             return;
         }
+        if (isQueuePaused()) {
+            String detail = queuePausedDetail();
+            setThreadTurnStatus(detail.isEmpty() ? "Queue paused. Tap Resume queue to continue." : detail, false);
+            maybePromptResumeQueue();
+            renderQueuedTurns();
+            return;
+        }
         startQueueWorker("Queue worker running.");
     }
 
@@ -3725,6 +3743,60 @@ public class MainActivity extends Activity {
         } catch (Exception error) {
             setThreadTurnStatus(error.getMessage() == null ? "Could not start queue worker." : error.getMessage(), true);
         }
+    }
+
+    private boolean isQueuePaused() {
+        return preferences != null && preferences.getBoolean(PREF_QUEUE_PAUSED, false);
+    }
+
+    private String queuePausedDetail() {
+        if (preferences == null) {
+            return "";
+        }
+        return preferences.getString(PREF_QUEUE_STALLED_DETAIL, "");
+    }
+
+    private void setQueuePaused(boolean paused, String detail) {
+        if (preferences == null) {
+            return;
+        }
+        preferences.edit()
+                .putBoolean(PREF_QUEUE_PAUSED, paused)
+                .putString(PREF_QUEUE_STALLED_DETAIL, detail == null ? "" : detail)
+                .apply();
+    }
+
+    private void stopQueueFromUi() {
+        setQueuePaused(true, "Queue stopped from the Android app.");
+        try {
+            CodexQueueService.stopQueue(this);
+        } catch (Exception error) {
+            Log.w(TAG, "Could not stop queue service", error);
+        }
+        setThreadTurnStatus("Queue stopped. Tap Resume queue to continue.", false);
+        renderQueuedTurns();
+        updateThreadComposerState();
+    }
+
+    private void resumeQueueFromUi() {
+        CodexQueueService.clearQueueFailures(this);
+        setQueuePaused(false, "");
+        queueResumePromptShown = true;
+        renderQueuedTurns();
+        startQueueWorker("Queue resumed.");
+    }
+
+    private void maybePromptResumeQueue() {
+        if (queueResumePromptShown || !isQueuePaused() || allQueueInfo().isEmpty() || isFinishing()) {
+            return;
+        }
+        queueResumePromptShown = true;
+        new AlertDialog.Builder(this)
+                .setTitle("Queued messages paused")
+                .setMessage("There are queued phone messages that are not being sent right now.")
+                .setPositiveButton("Resume queue", (dialog, which) -> resumeQueueFromUi())
+                .setNegativeButton("Keep paused", null)
+                .show();
     }
 
     private void reloadCurrentThreadQueueFromDisk() {
@@ -3752,6 +3824,9 @@ public class MainActivity extends Activity {
             }
             if (requestStage != null && !requestStage.isEmpty() && currentThreadId.equals(threadId)) {
                 updateRequestStatusPill(requestStage, requestSummary, status, isError, requestId, true);
+            }
+            if ("Stalled".equalsIgnoreCase(requestStage) || (isError && status != null && status.toLowerCase(Locale.US).contains("queue stalled"))) {
+                setQueuePaused(true, status);
             }
             if (threadId != null
                     && threadId.equals(currentThreadId)
@@ -3995,6 +4070,7 @@ public class MainActivity extends Activity {
         }
 
         queuedTurnListLayout.setVisibility(View.VISIBLE);
+        boolean queuePaused = isQueuePaused();
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
@@ -4006,6 +4082,18 @@ public class MainActivity extends Activity {
                 COLOR_INK,
                 Typeface.BOLD);
         header.addView(title, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        Button queueControlButton = toolbarButton(queuePaused ? "Resume" : "Stop", Color.WHITE, queuePaused ? COLOR_PRIMARY : COLOR_ACCENT);
+        queueControlButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
+        queueControlButton.setOnClickListener(view -> {
+            if (isQueuePaused()) {
+                resumeQueueFromUi();
+            } else {
+                stopQueueFromUi();
+            }
+        });
+        header.addView(queueControlButton, new LinearLayout.LayoutParams(dp(78), dp(32)));
+        header.addView(spacer(dp(6)));
 
         Button toggleButton = toolbarButton(queuedTurnsExpanded ? "Hide" : "Show", Color.WHITE, COLOR_PRIMARY);
         toggleButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
@@ -4080,6 +4168,13 @@ public class MainActivity extends Activity {
     private String queueStatusText(QueuedTurn turn) {
         if (turn == null) {
             return "";
+        }
+        if (isQueuePaused()) {
+            String detail = queuePausedDetail();
+            if (detail == null || detail.trim().isEmpty()) {
+                return "Paused. Tap Resume queue to continue.";
+            }
+            return detail;
         }
         if (turn.id.equals(lastRequestId) && !lastRequestStage.isEmpty()) {
             StringBuilder builder = new StringBuilder();

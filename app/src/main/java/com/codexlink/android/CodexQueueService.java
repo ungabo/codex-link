@@ -38,6 +38,7 @@ import java.util.concurrent.Executors;
 
 public class CodexQueueService extends Service {
     static final String ACTION_PROCESS_QUEUE = "com.codexlink.android.PROCESS_QUEUE";
+    static final String ACTION_STOP_QUEUE = "com.codexlink.android.STOP_QUEUE";
     static final String ACTION_QUEUE_CHANGED = "com.codexlink.android.QUEUE_CHANGED";
     static final String EXTRA_THREAD_ID = "thread_id";
     static final String EXTRA_STATUS = "status";
@@ -54,12 +55,17 @@ public class CodexQueueService extends Service {
     private static final String PREF_LOCAL_TOKEN = "local_token";
     private static final String PREF_WEB_ENDPOINT = "web_endpoint";
     private static final String PREF_WEB_TOKEN = "web_token";
+    private static final String PREF_QUEUE_PAUSED = "queue_paused";
+    private static final String PREF_QUEUE_STALLED_DETAIL = "queue_stalled_detail";
+    private static final String PREF_QUEUE_FAILURE_PREFIX = "queue_failure_count_";
+    private static final String PREF_QUEUE_FAILURE_DETAIL_PREFIX = "queue_failure_detail_";
     private static final String MODE_WEB = "web";
     private static final String DEFAULT_WEB_ENDPOINT = "https://www.sitesindevelopment.com/codex-link/index.php/link";
     private static final String DEFAULT_WEB_TOKEN = BuildConfig.CODEX_LINK_DEFAULT_WEB_TOKEN;
     private static final int NOTIFICATION_ID = 18766;
     private static final int READ_TIMEOUT_MS = 300000;
     private static final int CONNECT_TIMEOUT_MS = 10000;
+    private static final int MAX_FAILURES_BEFORE_PAUSE = 3;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private volatile boolean workerRunning = false;
@@ -128,7 +134,15 @@ public class CodexQueueService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         Log.i(TAG, "Queue service start requested.");
+        String action = intent == null ? "" : intent.getAction();
         startAsForeground("Checking queued Codex messages...");
+        if (ACTION_STOP_QUEUE.equals(action)) {
+            stopRequested = true;
+            setQueuePaused(true, "Queue stopped from the Android app.");
+            broadcastQueueChanged("", "Queue stopped. Tap Resume queue to continue.", false);
+            stopForegroundAndSelf();
+            return START_NOT_STICKY;
+        }
         requestQueueWork();
         return START_STICKY;
     }
@@ -164,6 +178,13 @@ public class CodexQueueService extends Service {
     private void runQueueLoop() {
         Log.i(TAG, "Queue worker loop started.");
         while (!stopRequested) {
+            if (isQueuePaused()) {
+                String detail = queuePausedDetail();
+                broadcastQueueChanged("", detail.isEmpty() ? "Queue paused. Tap Resume queue to continue." : detail, false);
+                updateNotification("Codex Link queue paused", detail.isEmpty() ? "Tap Resume queue to continue" : detail);
+                stopForegroundAndSelf();
+                return;
+            }
             ArrayList<QueueFile> queues = allQueues();
             int queuedCount = totalQueuedCount(queues);
             Log.i(TAG, "Queue pass found " + queuedCount + " queued message(s) in " + queues.size() + " chat(s).");
@@ -176,9 +197,8 @@ public class CodexQueueService extends Service {
             updateNotification("Sending queued Codex messages", queuedCount + " queued");
             EndpointConfig config = endpointConfig();
             if (config.endpoint.isEmpty()) {
-                broadcastQueueChanged("", "No Codex Link endpoint is configured.", true);
-                sleepFor(30000);
-                continue;
+                pauseQueue("No Codex Link endpoint is configured.");
+                return;
             }
 
             boolean madeProgress = false;
@@ -218,10 +238,14 @@ public class CodexQueueService extends Service {
                         lastStatus = httpErrorMessage("Queued send", result);
                         Log.w(TAG, lastStatus);
                         broadcastQueueChanged(queue.threadId, item, "Error", lastStatus, true);
+                        if (recordFailureAndShouldPause(queue.threadId, item.id, lastStatus)) {
+                            return;
+                        }
                         continue;
                     }
 
                     madeProgress = true;
+                    clearFailure(queue.threadId, item.id);
                     String sentStage;
                     String sentDetail;
                     if (isProcessingResponse(result)) {
@@ -240,6 +264,9 @@ public class CodexQueueService extends Service {
                     lastStatus = error.getMessage() == null ? "Queued send failed." : error.getMessage();
                     Log.w(TAG, "Queue pass failed for " + queue.threadId, error);
                     broadcastQueueChanged(queue.threadId, item, "Error", lastStatus, true);
+                    if (recordFailureAndShouldPause(queue.threadId, item.id, lastStatus)) {
+                        return;
+                    }
                 }
             }
 
@@ -249,10 +276,75 @@ public class CodexQueueService extends Service {
                 updateNotification("Codex Link queue waiting", lastStatus.isEmpty() ? "Waiting for active chats" : lastStatus);
                 sleepFor(15000);
             } else {
-                updateNotification("Codex Link queue paused", lastStatus.isEmpty() ? "Queued sends could not complete" : lastStatus);
+                updateNotification("Codex Link queue retrying", lastStatus.isEmpty() ? "Queued sends could not complete" : lastStatus);
                 sleepFor(30000);
             }
         }
+    }
+
+    private boolean recordFailureAndShouldPause(String threadId, String itemId, String detail) {
+        String key = failureKey(threadId, itemId);
+        String cleanDetail = cleanFailureDetail(detail);
+        int count = getSharedPreferences(PREFS, MODE_PRIVATE).getInt(PREF_QUEUE_FAILURE_PREFIX + key, 0) + 1;
+        getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit()
+                .putInt(PREF_QUEUE_FAILURE_PREFIX + key, count)
+                .putString(PREF_QUEUE_FAILURE_DETAIL_PREFIX + key, cleanDetail)
+                .apply();
+        if (count < MAX_FAILURES_BEFORE_PAUSE) {
+            return false;
+        }
+        pauseQueue("Queue stalled after " + count + " failed attempts. " + cleanDetail);
+        return true;
+    }
+
+    private void clearFailure(String threadId, String itemId) {
+        String key = failureKey(threadId, itemId);
+        getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit()
+                .remove(PREF_QUEUE_FAILURE_PREFIX + key)
+                .remove(PREF_QUEUE_FAILURE_DETAIL_PREFIX + key)
+                .apply();
+    }
+
+    private String failureKey(String threadId, String itemId) {
+        String raw = (threadId == null ? "" : threadId) + ":" + (itemId == null ? "" : itemId);
+        return raw.replaceAll("[^A-Za-z0-9._:-]+", "_");
+    }
+
+    private String cleanFailureDetail(String detail) {
+        if (detail == null || detail.trim().isEmpty()) {
+            return "Tap Resume queue after fixing the problem.";
+        }
+        String clean = detail.replace('\r', ' ').replace('\n', ' ').trim();
+        if (clean.length() > 260) {
+            clean = clean.substring(0, 257).trim() + "...";
+        }
+        return clean;
+    }
+
+    private void pauseQueue(String detail) {
+        String clean = cleanFailureDetail(detail);
+        setQueuePaused(true, clean);
+        broadcastQueueChanged("", clean, true);
+        updateNotification("Codex Link queue stalled", clean);
+        stopForegroundAndSelf();
+    }
+
+    private boolean isQueuePaused() {
+        return getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_QUEUE_PAUSED, false);
+    }
+
+    private String queuePausedDetail() {
+        return getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_QUEUE_STALLED_DETAIL, "");
+    }
+
+    private void setQueuePaused(boolean paused, String detail) {
+        getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit()
+                .putBoolean(PREF_QUEUE_PAUSED, paused)
+                .putString(PREF_QUEUE_STALLED_DETAIL, detail == null ? "" : detail)
+                .apply();
     }
 
     private ThreadState loadThreadState(EndpointConfig config, String threadId) throws IOException, JSONException {
@@ -822,5 +914,31 @@ public class CodexQueueService extends Service {
         } else {
             context.startService(intent);
         }
+    }
+
+    static void stopQueue(Context context) {
+        context.getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit()
+                .putBoolean(PREF_QUEUE_PAUSED, true)
+                .putString(PREF_QUEUE_STALLED_DETAIL, "Queue stopped from the Android app.")
+                .apply();
+        Intent intent = new Intent(context, CodexQueueService.class);
+        intent.setAction(ACTION_STOP_QUEUE);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            context.startForegroundService(intent);
+        } else {
+            context.startService(intent);
+        }
+    }
+
+    static void clearQueueFailures(Context context) {
+        android.content.SharedPreferences prefs = context.getSharedPreferences(PREFS, MODE_PRIVATE);
+        android.content.SharedPreferences.Editor editor = prefs.edit();
+        for (String key : prefs.getAll().keySet()) {
+            if (key.startsWith(PREF_QUEUE_FAILURE_PREFIX) || key.startsWith(PREF_QUEUE_FAILURE_DETAIL_PREFIX)) {
+                editor.remove(key);
+            }
+        }
+        editor.apply();
     }
 }
