@@ -35,7 +35,7 @@ ACTIVE_TURN_QUIET_STALE_SECONDS = 8 * 60
 ACTIVITY_TAIL_BYTES = 512 * 1024
 LIVE_EVENT_TAIL_BYTES = 768 * 1024
 MAX_LIVE_EVENTS = 80
-MAX_LIVE_EVENT_TEXT = 1800
+MAX_LIVE_EVENT_TEXT = 900
 UPLOAD_ROOT = PROJECT_ROOT / "desktop_bridge" / "uploaded_images"
 CHECKPOINTS_PATH = PROJECT_ROOT / "desktop_bridge" / "checkpoints.json"
 PROJECT_MAPPINGS_PATH = PROJECT_ROOT / "desktop_bridge" / "project_mappings.json"
@@ -693,11 +693,7 @@ def summarize_live_event(event: dict[str, Any]) -> dict[str, Any] | None:
         if event_type == "user_message":
             return live_event_record(timestamp, "message", "User message received", str(payload.get("message") or ""))
         if event_type == "token_count":
-            info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
-            last = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else {}
-            total = last.get("total_tokens")
-            detail = f"Last update used {total} tokens." if total else "Token usage updated."
-            return live_event_record(timestamp, "status", "Token usage", detail)
+            return None
         if event_type:
             return live_event_record(timestamp, "event", event_type.replace("_", " ").title(), payload)
         return None
@@ -714,6 +710,8 @@ def summarize_live_event(event: dict[str, Any]) -> dict[str, Any] | None:
         if item_type == "reasoning":
             summary = payload.get("summary")
             detail = compact_live_text(summary) if summary else ""
+            if not detail:
+                return None
             return live_event_record(timestamp, "reasoning", "Reasoning update", detail)
         return None
 

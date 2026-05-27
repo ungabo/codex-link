@@ -2364,7 +2364,7 @@ public class MainActivity extends Activity {
         TextView title = text("Live output", 13, COLOR_INK, Typeface.BOLD);
         panel.addView(title);
 
-        int start = Math.max(0, loadedLiveEvents.length() - 18);
+        int start = Math.max(0, loadedLiveEvents.length() - 10);
         StringBuilder builder = new StringBuilder();
         for (int index = start; index < loadedLiveEvents.length(); index++) {
             JSONObject event = loadedLiveEvents.optJSONObject(index);
@@ -4836,6 +4836,10 @@ public class MainActivity extends Activity {
         String token = tokenInput.getText().toString().trim();
         String threadId = currentThreadId;
         boolean promptFocused = threadPromptInput != null && threadPromptInput.hasFocus();
+        boolean userComposing = promptFocused
+                && threadPromptInput != null
+                && threadPromptInput.getText() != null
+                && threadPromptInput.getText().length() > 0;
         boolean followLatest = isNearThreadBottom() && !promptFocused;
         Integer before = !followLatest && !currentThreadFullLoaded && loadedRangeEnd > 0 ? loadedRangeEnd : null;
         if (endpoint.isEmpty()) {
@@ -4853,6 +4857,10 @@ public class MainActivity extends Activity {
                 mainHandler.post(() -> {
                     isPollingThread = false;
                     if (!threadId.equals(currentThreadId)) {
+                        return;
+                    }
+                    if (userComposing) {
+                        scheduleThreadPoll();
                         return;
                     }
                     if (signature.equals(lastRenderedThreadSignature)) {
