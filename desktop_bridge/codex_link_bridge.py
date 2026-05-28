@@ -773,10 +773,12 @@ def collect_message_text(content: Any) -> str:
 
 
 def rollout_thread_id_from_path(path: Path) -> str:
-    stem = path.stem
-    if "-" not in stem:
-        return ""
-    return stem.rsplit("-", 1)[-1]
+    match = re.search(
+        r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+        path.stem,
+        re.IGNORECASE,
+    )
+    return match.group(1) if match else ""
 
 
 def find_session_rollout_path(codex_home: Path, thread_id: str) -> Path | None:
@@ -1056,10 +1058,11 @@ def parse_positive_int(value: str | None, default: int, max_value: int) -> int:
     return min(parsed, max_value)
 
 
-def load_thread_row(codex_home: Path, thread_id: str) -> sqlite3.Row | None:
+def load_thread_row(codex_home: Path, thread_id: str) -> sqlite3.Row | dict[str, Any] | None:
     db_path = codex_home / "state_5.sqlite"
     if not db_path.exists():
-        return None
+        rollout_path = find_session_rollout_path(codex_home, thread_id)
+        return rollout_fallback_row(rollout_path, thread_id) if rollout_path is not None else None
 
     connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
@@ -1076,6 +1079,9 @@ def load_thread_row(codex_home: Path, thread_id: str) -> sqlite3.Row | None:
     finally:
         connection.close()
 
+    if row is None:
+        rollout_path = find_session_rollout_path(codex_home, thread_id)
+        return rollout_fallback_row(rollout_path, thread_id) if rollout_path is not None else None
     return row
 
 
@@ -1331,6 +1337,8 @@ def run_process(command: list[str], *, cwd: Path | str | None = None, timeout: i
         command,
         cwd=cwd,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         timeout=timeout,
     )
@@ -1815,6 +1823,8 @@ def run_phase0_command(command: list[str], timeout: int) -> subprocess.Completed
         command,
         cwd=PHASE0_DIR,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         creationflags=creationflags,
@@ -1878,6 +1888,8 @@ def run_phase0_turn_until_started(command: list[str], timeout: int) -> subproces
         command,
         cwd=PHASE0_DIR,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         creationflags=creationflags,
@@ -2478,9 +2490,24 @@ def parse_phase0_json(completed: subprocess.CompletedProcess[str], operation: st
 def run_codex_start_thread(cwd: str, prompt: str = "") -> dict[str, Any]:
     command = [phase0_npm(), "run", "start-thread", "--", cwd]
     if prompt:
-        command.append(prompt)
-    completed = run_phase0_command(command, timeout=240)
+        command.extend(["--emit-started", prompt])
+        completed = run_phase0_turn_until_started(command, timeout=120)
+    else:
+        completed = run_phase0_command(command, timeout=240)
     result = parse_phase0_json(completed, "Codex thread start")
+    if result.get("event") == "started" or (result.get("accepted") and not result.get("completed", True)):
+        return {
+            "ok": True,
+            "accepted": True,
+            "completed": False,
+            "status": "processing",
+            "source": "codex-app-server",
+            "threadId": result.get("threadId"),
+            "cwd": result.get("cwd") or cwd,
+            "turnId": result.get("turnId") or "",
+            "agentText": "",
+            "notificationCounts": {},
+        }
     return {
         "ok": True,
         "source": "codex-app-server",

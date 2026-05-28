@@ -109,8 +109,11 @@ async function main(): Promise<void> {
   mkdirSync(logsDir, { recursive: true });
 
   const config = loadConfig();
-  const cwd = (process.argv[2] ?? config.testProjectDir).trim();
-  const prompt = process.argv.slice(3).join(" ").trim();
+  const args = process.argv.slice(2);
+  const emitStarted = args.includes("--emit-started");
+  const positional = args.filter((arg) => arg !== "--emit-started");
+  const cwd = (positional[0] ?? config.testProjectDir).trim();
+  const prompt = positional.slice(1).join(" ").trim();
   if (!cwd) {
     throw new Error("Usage: npm run start-thread -- <cwd> [initial prompt]");
   }
@@ -195,6 +198,23 @@ async function main(): Promise<void> {
         60000,
       );
       turnId = String(((turn as JsonObject).turn as JsonObject | undefined)?.id ?? turnId);
+      if (emitStarted) {
+        console.log(
+          JSON.stringify({
+            ok: true,
+            event: "started",
+            accepted: true,
+            completed: false,
+            status: "processing",
+            codexVersion: version,
+            threadId,
+            cwd,
+            turnId,
+            rawLogPath,
+            serverLogPath,
+          }),
+        );
+      }
       await waitForTurnCompleted(notifications, threadId, turnId, config.turnTimeoutMs);
     }
 

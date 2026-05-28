@@ -102,6 +102,7 @@ public class MainActivity extends Activity {
     private static final String STATE_THREAD_CWD = "thread_cwd";
     private static final String STATE_THREAD_CHAT_PATH = "thread_chat_path";
     private static final String STATE_THREAD_PROJECT_ERROR = "thread_project_error";
+    private static final String STATE_THREAD_DRAFT_NEW = "thread_draft_new";
     private static final String STATE_THREAD_ACTIVE_TURN_ID = "thread_active_turn_id";
     private static final String STATE_THREAD_STALE_REASON = "thread_stale_reason";
     private static final String STATE_THREAD_SEARCH = "thread_search";
@@ -204,6 +205,7 @@ public class MainActivity extends Activity {
     private String currentThreadActiveTurnId = "";
     private String currentThreadStaleReason = "";
     private String currentThreadSearchQuery = "";
+    private boolean currentThreadDraftNew = false;
     private String currentConnectionMode = MODE_LOCAL;
     private String queueThreadId;
     private Uri selectedImageUri;
@@ -413,6 +415,7 @@ public class MainActivity extends Activity {
         outState.putString(STATE_THREAD_CWD, currentThreadCwd);
         outState.putString(STATE_THREAD_CHAT_PATH, currentThreadChatPath);
         outState.putString(STATE_THREAD_PROJECT_ERROR, currentThreadProjectError);
+        outState.putBoolean(STATE_THREAD_DRAFT_NEW, currentThreadDraftNew);
         outState.putString(STATE_THREAD_ACTIVE_TURN_ID, currentThreadActiveTurnId);
         outState.putString(STATE_THREAD_STALE_REASON, currentThreadStaleReason);
         outState.putString(STATE_THREAD_SEARCH, currentThreadSearchQuery);
@@ -1155,6 +1158,7 @@ public class MainActivity extends Activity {
         currentThreadCwd = state.getString(STATE_THREAD_CWD, "");
         currentThreadChatPath = state.getString(STATE_THREAD_CHAT_PATH, "");
         currentThreadProjectError = state.getString(STATE_THREAD_PROJECT_ERROR, "");
+        currentThreadDraftNew = state.getBoolean(STATE_THREAD_DRAFT_NEW, false);
         currentThreadActiveTurnId = state.getString(STATE_THREAD_ACTIVE_TURN_ID, "");
         currentThreadStaleReason = state.getString(STATE_THREAD_STALE_REASON, "");
         currentThreadSearchQuery = state.getString(STATE_THREAD_SEARCH, "");
@@ -1209,8 +1213,10 @@ public class MainActivity extends Activity {
         updateAttachmentPreview();
         updateQueueEditUi();
 
-        if (currentThreadId != null && !currentThreadId.isEmpty()) {
-            ensureQueueLoadedForCurrentThread();
+        if (currentThreadDraftNew || (currentThreadId != null && !currentThreadId.isEmpty())) {
+            if (!currentThreadDraftNew) {
+                ensureQueueLoadedForCurrentThread();
+            }
             setCatalogThreadMode(true);
             catalogView.setVisibility(View.GONE);
             renderThreadControls(currentThreadFullLoaded);
@@ -1219,9 +1225,9 @@ public class MainActivity extends Activity {
             updateThreadComposerState();
             final int scrollY = state.getInt(STATE_SCROLL_Y, 0);
             rootScrollView.post(() -> rootScrollView.scrollTo(0, Math.max(0, scrollY)));
-            if (currentThreadActive || !queuedThreadTurns.isEmpty()) {
+            if (!currentThreadDraftNew && (currentThreadActive || !queuedThreadTurns.isEmpty())) {
                 scheduleThreadPoll();
-            } else {
+            } else if (!currentThreadDraftNew) {
                 maybeRunQueuedTurn();
             }
         }
@@ -1235,7 +1241,8 @@ public class MainActivity extends Activity {
         try {
             JSONObject state = new JSONObject(raw);
             currentThreadId = emptyToNull(state.optString(STATE_THREAD_ID, ""));
-            if (currentThreadId == null || currentThreadId.isEmpty()) {
+            currentThreadDraftNew = state.optBoolean(STATE_THREAD_DRAFT_NEW, false);
+            if (!currentThreadDraftNew && (currentThreadId == null || currentThreadId.isEmpty())) {
                 return;
             }
             currentThreadTitle = emptyToNull(state.optString(STATE_THREAD_TITLE, ""));
@@ -1270,7 +1277,9 @@ public class MainActivity extends Activity {
             updateAttachmentPreview();
             updateQueueEditUi();
 
-            ensureQueueLoadedForCurrentThread();
+            if (!currentThreadDraftNew) {
+                ensureQueueLoadedForCurrentThread();
+            }
             setCatalogThreadMode(true);
             catalogView.setVisibility(View.GONE);
             renderThreadControls(currentThreadFullLoaded);
@@ -1279,7 +1288,7 @@ public class MainActivity extends Activity {
             updateThreadComposerState();
 
             String endpoint = normalizedEndpoint();
-            if (!endpoint.isEmpty()) {
+            if (!currentThreadDraftNew && !endpoint.isEmpty()) {
                 loadThreadPage(currentThreadId, currentThreadTitle, null, currentThreadFullLoaded, false);
             }
         } catch (JSONException error) {
@@ -1291,17 +1300,18 @@ public class MainActivity extends Activity {
         if (preferences == null) {
             return;
         }
-        if (currentThreadId == null || currentThreadId.isEmpty()) {
+        if (!currentThreadDraftNew && (currentThreadId == null || currentThreadId.isEmpty())) {
             preferences.edit().remove(PREF_ACTIVE_THREAD_STATE).apply();
             return;
         }
         try {
             JSONObject state = new JSONObject()
-                    .put(STATE_THREAD_ID, currentThreadId)
+                    .put(STATE_THREAD_ID, currentThreadId == null ? "" : currentThreadId)
                     .put(STATE_THREAD_TITLE, currentThreadTitle == null ? "" : currentThreadTitle)
                     .put(STATE_THREAD_CWD, currentThreadCwd)
                     .put(STATE_THREAD_CHAT_PATH, currentThreadChatPath)
                     .put(STATE_THREAD_PROJECT_ERROR, currentThreadProjectError)
+                    .put(STATE_THREAD_DRAFT_NEW, currentThreadDraftNew)
                     .put(STATE_THREAD_ACTIVE_TURN_ID, currentThreadActiveTurnId)
                     .put(STATE_THREAD_STALE_REASON, currentThreadStaleReason)
                     .put(STATE_THREAD_SEARCH, currentThreadSearchQuery)
@@ -2293,6 +2303,7 @@ public class MainActivity extends Activity {
         ScrollAnchor scrollAnchor = !prepend && !wasNearBottom ? captureThreadScrollAnchor() : null;
 
         if (thread != null) {
+            currentThreadDraftNew = false;
             currentThreadId = thread.optString("id");
             currentThreadTitle = thread.optString("title", "Untitled chat");
             currentThreadProjectError = thread.optString("projectRootError", "");
@@ -2379,6 +2390,7 @@ public class MainActivity extends Activity {
         }
         boolean wasProcessing = currentThreadActive || currentThreadStaleActive || isSendingThreadTurn;
         currentThreadId = thread.optString("id", currentThreadId == null ? "" : currentThreadId);
+        currentThreadDraftNew = false;
         currentThreadTitle = thread.optString("title", currentThreadTitle == null ? "Untitled chat" : currentThreadTitle);
         currentThreadProjectError = thread.optString("projectRootError", currentThreadProjectError == null ? "" : currentThreadProjectError);
         currentThreadCwd = writableProjectPathFromThread(thread);
@@ -2836,6 +2848,9 @@ public class MainActivity extends Activity {
 
     private String threadHeaderText(boolean full) {
         String title = currentThreadTitle == null || currentThreadTitle.isEmpty() ? "Untitled chat" : currentThreadTitle;
+        if (currentThreadDraftNew) {
+            return title + "\nNew chat draft\n\n" + (currentThreadCwd == null || currentThreadCwd.isEmpty() ? "Choose a project by opening an existing chat first." : currentThreadCwd);
+        }
         return title + "\n" + currentThreadId + "\n\n" + threadScopeText(full);
     }
 
@@ -2847,6 +2862,9 @@ public class MainActivity extends Activity {
 
     private String fixedThreadSummaryText(boolean full) {
         String title = currentThreadTitle == null || currentThreadTitle.isEmpty() ? "Untitled chat" : currentThreadTitle;
+        if (currentThreadDraftNew) {
+            return title + " - draft";
+        }
         String scope = full
                 ? "Full chat"
                 : Math.max(1, loadedRangeStart + 1) + "-" + loadedRangeEnd + " of " + totalThreadMessages;
@@ -3095,7 +3113,6 @@ public class MainActivity extends Activity {
 
     private void startNewThreadFromCurrentProject() {
         String endpoint = normalizedEndpoint();
-        String token = tokenInput.getText().toString().trim();
         if (endpoint.isEmpty()) {
             setThreadTurnStatus("Enter the desktop endpoint URL first.", true);
             return;
@@ -3108,35 +3125,29 @@ public class MainActivity extends Activity {
             return;
         }
 
-        setThreadTurnStatus("Starting a new chat for this project...", false);
-        networkExecutor.execute(() -> {
-            try {
-                JSONObject payload = new JSONObject()
-                        .put("cwd", currentThreadCwd)
-                        .put("androidRequestId", UUID.randomUUID().toString())
-                        .put("appVersion", BuildConfig.VERSION_NAME);
-                String collectionEndpoint = threadsCollectionEndpointFor(endpoint);
-                Log.i(TAG, "Starting new thread from " + collectionEndpoint + " cwd=" + currentThreadCwd);
-                String body = postThreadPayload(collectionEndpoint, token, payload);
-                JSONObject response = new JSONObject(body);
-                String threadId = response.optString("threadId", "");
-                if (threadId.isEmpty()) {
-                    JSONObject thread = response.optJSONObject("thread");
-                    threadId = thread == null ? "" : thread.optString("id", "");
-                }
-                if (threadId.isEmpty()) {
-                    throw new IOException("Desktop endpoint did not return a new thread id.");
-                }
-                String newThreadId = threadId;
-                mainHandler.post(() -> {
-                    setThreadTurnStatus("New chat started.", false);
-                    loadThread(newThreadId, "New chat");
-                });
-            } catch (Exception error) {
-                Log.e(TAG, "Could not start new thread", error);
-                mainHandler.post(() -> setThreadTurnStatus(error.getMessage() == null ? "Could not start chat." : error.getMessage(), true));
-            }
-        });
+        currentThreadDraftNew = true;
+        currentThreadId = "";
+        currentThreadTitle = "New chat";
+        currentThreadActive = false;
+        currentThreadStaleActive = false;
+        currentThreadActiveTurnId = "";
+        currentThreadStaleReason = "";
+        currentThreadSearchQuery = "";
+        loadedThreadMessages = new JSONArray();
+        loadedLiveEvents = new JSONArray();
+        loadedRangeStart = 0;
+        loadedRangeEnd = 0;
+        totalThreadMessages = 0;
+        hasMoreThreadMessages = false;
+        currentThreadFullLoaded = false;
+        unloadThreadQueue();
+        setCatalogThreadMode(true);
+        catalogView.setVisibility(View.GONE);
+        renderThreadControls(false);
+        renderThreadMessages(endpoint);
+        updateThreadComposerState();
+        saveActiveThreadState();
+        setThreadTurnStatus("New chat draft. Type the first message to create it.", false);
     }
 
     private void confirmStopCurrentThread() {
@@ -3746,6 +3757,7 @@ public class MainActivity extends Activity {
         currentThreadCwd = "";
         currentThreadChatPath = "";
         currentThreadProjectError = "";
+        currentThreadDraftNew = false;
         currentThreadActiveTurnId = "";
         currentThreadStaleReason = "";
         loadedRangeStart = 0;
@@ -3973,6 +3985,10 @@ public class MainActivity extends Activity {
         boolean hasPreservedImages = preservedImages != null && preservedImages.length() > 0;
         boolean hasAttachment = attachmentUri != null || hasPreservedImages;
 
+        if (currentThreadDraftNew) {
+            sendNewThreadPrompt(prompt, attachmentUri, attachmentName, attachmentMimeType, preservedImages, hasAttachment);
+            return;
+        }
         if (currentThreadId == null || currentThreadId.isEmpty()) {
             setThreadTurnStatus("Open a chat first.", true);
             return;
@@ -4027,6 +4043,116 @@ public class MainActivity extends Activity {
                     isSendingThreadTurn = false;
                     updateThreadComposerState();
                     setThreadTurnStatus(friendlyThreadError(error, "Could not queue message."), true);
+                });
+            }
+        });
+    }
+
+    private void sendNewThreadPrompt(
+            String prompt,
+            Uri attachmentUri,
+            String attachmentName,
+            String attachmentMimeType,
+            JSONArray preservedImages,
+            boolean hasAttachment
+    ) {
+        String endpoint = normalizedEndpoint();
+        String token = tokenInput.getText().toString().trim();
+        if (endpoint.isEmpty()) {
+            setThreadTurnStatus("Enter the desktop endpoint URL first.", true);
+            return;
+        }
+        if (!hasWritableProjectRoot()) {
+            setThreadTurnStatus("Cannot start this chat without a writable project path.", true);
+            return;
+        }
+        if (prompt.isEmpty() && !hasAttachment) {
+            setThreadTurnStatus("Type the first message or attach an image to start this chat.", true);
+            threadPromptInput.requestFocus();
+            return;
+        }
+        if (prompt.isEmpty()) {
+            prompt = "Please review the attached image.";
+        }
+        if (isSendingThreadTurn) {
+            setThreadTurnStatus("Already starting this chat.", false);
+            return;
+        }
+
+        String projectRoot = currentThreadCwd;
+        String promptToSend = prompt;
+        Uri attachmentToSend = attachmentUri;
+        String attachmentNameToSend = attachmentName;
+        String attachmentMimeToSend = attachmentMimeType;
+        JSONArray preservedImagesToSend = copyJsonArray(preservedImages);
+        String originalDraft = threadPromptInput.getText().toString();
+
+        saveSettings();
+        isSendingThreadTurn = true;
+        updateThreadComposerState();
+        setThreadTurnStatus("Starting new chat...", false);
+        threadPromptInput.setText("");
+        if (hasAttachment) {
+            clearSelectedImageState();
+            editingQueuedImages = null;
+            updateAttachmentPreview();
+        }
+
+        networkExecutor.execute(() -> {
+            try {
+                JSONObject payload = buildThreadTurnPayload(
+                        promptToSend,
+                        attachmentToSend,
+                        attachmentNameToSend,
+                        attachmentMimeToSend,
+                        preservedImagesToSend);
+                payload.put("cwd", projectRoot);
+                ensurePayloadRequestId(payload, UUID.randomUUID().toString());
+                String collectionEndpoint = threadsCollectionEndpointFor(endpoint);
+                Log.i(TAG, "Starting new thread with first prompt at " + collectionEndpoint + " cwd=" + projectRoot);
+                String body = postThreadPayload(collectionEndpoint, token, payload);
+                JSONObject response = new JSONObject(body);
+                String threadId = response.optString("threadId", "");
+                if (threadId.isEmpty()) {
+                    JSONObject thread = response.optJSONObject("thread");
+                    threadId = thread == null ? "" : thread.optString("id", "");
+                }
+                if (threadId.isEmpty()) {
+                    throw new IOException("Desktop endpoint did not return a new thread id.");
+                }
+                boolean processing = "processing".equalsIgnoreCase(response.optString("status", ""))
+                        || (response.optBoolean("accepted", false) && !response.optBoolean("completed", true));
+                String newThreadId = threadId;
+                mainHandler.post(() -> {
+                    isSendingThreadTurn = false;
+                    currentThreadDraftNew = false;
+                    currentThreadId = newThreadId;
+                    currentThreadTitle = "New chat";
+                    currentThreadCwd = projectRoot;
+                    currentThreadActive = processing;
+                    currentThreadStaleActive = false;
+                    currentThreadActiveTurnId = response.optString("turnId", "");
+                    updateThreadComposerState();
+                    setThreadTurnStatus(processing
+                            ? "New chat received by Windows. Codex is processing."
+                            : "New chat created.", false);
+                    saveActiveThreadState();
+                    loadThreadPage(newThreadId, "New chat", null, false, false);
+                    if (processing) {
+                        scheduleThreadPoll();
+                    }
+                });
+            } catch (Exception error) {
+                Log.e(TAG, "Could not start new thread", error);
+                mainHandler.post(() -> {
+                    isSendingThreadTurn = false;
+                    if (currentThreadDraftNew && threadPromptInput != null && threadPromptInput.getText().length() == 0) {
+                        threadPromptInput.setText(originalDraft);
+                        threadPromptInput.setSelection(threadPromptInput.length());
+                    }
+                    updateThreadComposerState();
+                    setThreadTurnStatus(friendlyThreadError(error, "Could not start chat."), true);
+                    saveActiveThreadState();
                 });
             }
         });
@@ -4552,6 +4678,12 @@ public class MainActivity extends Activity {
             updateQueueEditUi();
             return;
         }
+        if (currentThreadDraftNew) {
+            threadSendButton.setEnabled(true);
+            threadSendButton.setText(isSendingThreadTurn ? "Starting" : "Start");
+            threadPromptInput.setHint("Start new chat");
+            return;
+        }
         boolean queueMode = currentThreadActive || isSendingThreadTurn;
         threadSendButton.setEnabled(true);
         threadSendButton.setText(queueMode ? "Queue" : "Send");
@@ -4562,7 +4694,10 @@ public class MainActivity extends Activity {
 
     private String processingStatusText() {
         if (isSendingThreadTurn) {
-            return queuedThreadTurns.isEmpty() ? "Sending to Codex..." : "Sending queued message...";
+            return currentThreadDraftNew ? "Starting new Codex chat..." : (queuedThreadTurns.isEmpty() ? "Sending to Codex..." : "Sending queued message...");
+        }
+        if (currentThreadDraftNew) {
+            return "Draft ready. Your first message will create the chat.";
         }
         if (currentThreadActive) {
             int count = queuedThreadTurns.size();

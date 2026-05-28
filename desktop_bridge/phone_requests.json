@@ -16,5 +16,58 @@
       }
     },
     "updatedAt": "2026-05-28T01:06:21.385516Z"
+  },
+  "turn:019e57e2-e6b1-75c0-be43-00019887c9bf:3e29fb51-5f44-40c8-bb25-956f439dcbba": {
+    "kind": "turn",
+    "threadId": "019e57e2-e6b1-75c0-be43-00019887c9bf",
+    "requestId": "3e29fb51-5f44-40c8-bb25-956f439dcbba",
+    "status": 202,
+    "response": {
+      "ok": true,
+      "accepted": true,
+      "completed": false,
+      "status": "processing",
+      "source": "codex-app-server",
+      "threadId": "019e57e2-e6b1-75c0-be43-00019887c9bf",
+      "turnId": "019e6c24-6202-7320-875d-44d285c247ed",
+      "agentText": "",
+      "notificationCounts": {},
+      "checkpoint": {
+        "ok": true,
+        "isGitRepo": true,
+        "root": "D:/__MY APPS/codex link for android",
+        "checkpointHash": "a3621857f90103d5f72a006dd0860e8e3da31486",
+        "checkpointShortHash": "a362185",
+        "createdCommit": true,
+        "commitOutput": "[main a362185] Codex Link checkpoint (before-phone-turn) 2026-05-28 01:12:58 UTC\n 27 files changed, 701 insertions(+), 122 deletions(-)\n create mode 100644 debug/phone-queue-backup-20260527-204322/._cache\n create mode 100644 debug/phone-queue-backup-20260527-204322/._code_cache\n create mode 100644 debug/phone-queue-backup-20260527-204322/._databases\n create mode 100644 debug/phone-queue-backup-20260527-204322/._files\n create mode 100644 debug/phone-queue-backup-20260527-204322/._files_queue-history\n create mode 100644 debug/phone-queue-backup-20260527-204322/._files_queue-history_019e57e2-e6b1-75c0-be43-00019887c9bf.json\n create mode 100644 debug/phone-queue-backup-20260527-204322/._files_queue-history_019e5b1e-766e-7600-9e5f-59fc1d7fc672.json\n create mode 100644 debug/phone-queue-backup-20260527-204322/._files_queues\n create mode 100644 debug/phone-queue-backup-20260527-204322/._files_queues_019e0ff7-b529-7bc0-a0c7-079d82f4fb2d.json\n create mode 100644 debug/phone-queue-backup-20260527-204322/._files_queues_019e57e2-e6b1-75c0-be43-00019887c9bf.json\n create mode 100644 debug/phone-queue-backup-20260527-204322/._files_queues_019e5b1e-766e-7600-9e5f-59fc1d7fc672.json\n create mode 100644 debug/phone-queue-backup-20260527-204322/._no_backup\n create mode 100644 debug/phone-queue-backup-20260527-204322/._shared_prefs\n create mode 100644 debug/phone-queue-backup-20260527-204322/._shared_prefs_android.app.ActivityThread.IDS.xml\n create mode 100644 debug/phone-queue-backup-20260527-204322/._shared_prefs_codex_link.xml\n create mode 100644 debug/ui-v0133-after-wait.xml\n create mode 100644 debug/ui-v0133-launch.xml\n create mode 100644 desktop_bridge/phone_requests.json",
+        "checkpoint": {
+          "cwd": "D:/__MY APPS/codex link for android",
+          "threadId": "019e57e2-e6b1-75c0-be43-00019887c9bf",
+          "hash": "a3621857f90103d5f72a006dd0860e8e3da31486",
+          "label": "before-phone-turn",
+          "createdAt": "2026-05-28T01:13:00.920003Z"
+        }
+      }
+    },
+    "updatedAt": "2026-05-28T01:13:04.260956Z"
+  },
+  "thread-start::0cd4da7f-7edb-452c-abaf-30286e71e670": {
+    "kind": "thread-start",
+    "threadId": "",
+    "requestId": "0cd4da7f-7edb-452c-abaf-30286e71e670",
+    "status": 200,
+    "response": {
+      "ok": true,
+      "accepted": true,
+      "completed": false,
+      "status": "processing",
+      "source": "codex-app-server",
+      "threadId": "019e6c2e-64eb-7290-9a16-a2924290fa9d",
+      "cwd": "D:\\__MY APPS\\codex link for android",
+      "turnId": "019e6c2e-697b-7013-8bef-ec5eac5163d3",
+      "agentText": "",
+      "notificationCounts": {}
+    },
+    "updatedAt": "2026-05-28T01:24:01.534800Z"
   }
 }
