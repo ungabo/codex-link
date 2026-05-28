@@ -1,33 +1,9 @@
-# Download The Android APK
+# Download Codex Link APK
 
-Current APK build: `0.1.30`
+Latest debug APK: `v0.1.33`
 
-Use this direct APK download link from your phone:
+- Local file: `D:\__MY APPS\codex link for android\codex-link-debug.apk`
+- Artifact copy: `D:\__MY APPS\codex link for android\artifacts\codex-link-debug.apk`
+- Web download: https://www.sitesindevelopment.com/codex-link/codex-link-debug.apk
 
-```text
-https://www.sitesindevelopment.com/codex-link/codex-link-debug.apk
-```
-
-GitHub release download:
-
-```text
-https://github.com/ungabo/codex-link/releases/latest/download/codex-link-debug.apk
-```
-
-The APK is also committed directly in the repository root as:
-
-```text
-codex-link-debug.apk
-```
-
-Current release page:
-
-```text
-https://github.com/ungabo/codex-link/releases/latest
-```
-
-Repository:
-
-```text
-https://github.com/ungabo/codex-link
-```
+This build adds queue idempotency, per-item stalled handling, safer endpoint normalization, and steadier chat polling while reading or typing.

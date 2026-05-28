@@ -12,7 +12,11 @@ import android.os.Build;
 
 final class NotificationHelper {
     private static final String CHANNEL_ID = "codex_link_status";
+    private static final String PREFS = "codex_link";
+    private static final String PREF_FOREGROUND_ACTIVE = "foreground_active";
+    private static final String PREF_FOREGROUND_THREAD_ID = "foreground_thread_id";
     private static final int INSTALL_NOTIFICATION_ID = 18765;
+    private static final int COMPLETION_NOTIFICATION_BASE_ID = 19765;
 
     private NotificationHelper() {
     }
@@ -97,5 +101,53 @@ final class NotificationHelper {
             return;
         }
         manager.notify(notificationId, buildQueueNotification(context, title, text, ongoing));
+    }
+
+    static void showTurnCompletedNotification(Context context, String threadId, String threadTitle) {
+        if (threadId == null || threadId.isEmpty() || isForegroundChat(context, threadId)) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 33
+                && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        ensureChannel(context);
+        NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager == null) {
+            return;
+        }
+
+        Intent intent = new Intent(context, MainActivity.class);
+        intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        intent.putExtra(MainActivity.EXTRA_OPEN_THREAD_ID, threadId);
+        intent.putExtra(MainActivity.EXTRA_OPEN_THREAD_TITLE, threadTitle == null ? "" : threadTitle);
+        PendingIntent pendingIntent = PendingIntent.getActivity(
+                context,
+                2 + Math.abs(threadId.hashCode() % 10000),
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        String text = threadTitle == null || threadTitle.trim().isEmpty()
+                ? "A Codex request finished."
+                : threadTitle.trim();
+        Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? new Notification.Builder(context, CHANNEL_ID)
+                : new Notification.Builder(context);
+        Notification notification = builder
+                .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                .setContentTitle("Codex request completed")
+                .setContentText(text)
+                .setContentIntent(pendingIntent)
+                .setAutoCancel(true)
+                .build();
+        manager.notify(COMPLETION_NOTIFICATION_BASE_ID + Math.abs(threadId.hashCode() % 1000), notification);
+    }
+
+    private static boolean isForegroundChat(Context context, String threadId) {
+        if (threadId == null || threadId.isEmpty()) {
+            return false;
+        }
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(PREF_FOREGROUND_ACTIVE, false)
+                && threadId.equals(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(PREF_FOREGROUND_THREAD_ID, ""));
     }
 }

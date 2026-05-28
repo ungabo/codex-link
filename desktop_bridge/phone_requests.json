@@ -1,0 +1,20 @@
+{
+  "thread-start::13ceb272-adee-4eeb-bd60-ee532fb01d28": {
+    "kind": "thread-start",
+    "threadId": "",
+    "requestId": "13ceb272-adee-4eeb-bd60-ee532fb01d28",
+    "status": 200,
+    "response": {
+      "ok": true,
+      "source": "codex-app-server",
+      "threadId": "019e6c1e-2a45-7fb2-82f2-df48336bc230",
+      "cwd": "D:\\__MY APPS\\codex link for android",
+      "turnId": "",
+      "agentText": "",
+      "notificationCounts": {
+        "remoteControl/status/changed": 1
+      }
+    },
+    "updatedAt": "2026-05-28T01:06:21.385516Z"
+  }
+}

@@ -59,6 +59,8 @@ public class CodexQueueService extends Service {
     private static final String PREF_QUEUE_STALLED_DETAIL = "queue_stalled_detail";
     private static final String PREF_QUEUE_FAILURE_PREFIX = "queue_failure_count_";
     private static final String PREF_QUEUE_FAILURE_DETAIL_PREFIX = "queue_failure_detail_";
+    private static final String PREF_EDITING_QUEUE_THREAD_ID = "editing_queue_thread_id";
+    private static final String PREF_EDITING_QUEUE_ITEM_ID = "editing_queue_item_id";
     private static final String MODE_WEB = "web";
     private static final String DEFAULT_WEB_ENDPOINT = "https://www.sitesindevelopment.com/codex-link/index.php/link";
     private static final String DEFAULT_WEB_TOKEN = BuildConfig.CODEX_LINK_DEFAULT_WEB_TOKEN;
@@ -80,6 +82,7 @@ public class CodexQueueService extends Service {
             this.id = id == null || id.isEmpty() ? "" : id;
             this.createdAt = createdAt;
             this.payload = payload;
+            ensurePayloadRequestId(this.payload, this.id);
         }
     }
 
@@ -203,13 +206,33 @@ public class CodexQueueService extends Service {
 
             boolean madeProgress = false;
             boolean sawBusyThread = false;
+            boolean sawStalledItem = false;
             String lastStatus = "";
             for (QueueFile queue : queues) {
                 if (stopRequested || queue.items.isEmpty()) {
                     continue;
                 }
 
-                QueueItem item = queue.items.get(0);
+                QueueItem item = null;
+                for (QueueItem candidate : queue.items) {
+                    if (isQueueItemBeingEdited(queue.threadId, candidate.id)) {
+                        sawBusyThread = true;
+                        lastStatus = "Waiting for you to save or cancel the queued edit.";
+                        broadcastQueueChanged(queue.threadId, candidate, "Editing", lastStatus, false);
+                        continue;
+                    }
+                    if (isQueueItemStalled(queue.threadId, candidate.id)) {
+                        sawStalledItem = true;
+                        lastStatus = stalledItemDetail(queue.threadId, candidate.id);
+                        broadcastQueueChanged(queue.threadId, candidate, "Error", lastStatus, true);
+                        continue;
+                    }
+                    item = candidate;
+                    break;
+                }
+                if (item == null) {
+                    continue;
+                }
                 try {
                     ThreadState state = loadThreadState(config, queue.threadId);
                     Log.i(TAG, "Queue thread " + queue.threadId + " active=" + state.active);
@@ -226,6 +249,7 @@ public class CodexQueueService extends Service {
                     String turnsEndpoint = threadTurnsEndpointFor(config.endpoint, queue.threadId);
                     Log.i(TAG, "Posting queued turn for " + queue.threadId + " to " + turnsEndpoint);
                     broadcastQueueChanged(queue.threadId, item, "Sending", "Sending to Windows.", false);
+                    ensurePayloadRequestId(item.payload, item.id);
                     HttpResult result = postJson(config, turnsEndpoint, item.payload);
                     Log.i(TAG, "Queued turn result for " + queue.threadId + ": HTTP " + result.status);
                     if (result.status == 409) {
@@ -239,7 +263,7 @@ public class CodexQueueService extends Service {
                         Log.w(TAG, lastStatus);
                         broadcastQueueChanged(queue.threadId, item, "Error", lastStatus, true);
                         if (recordFailureAndShouldPause(queue.threadId, item.id, lastStatus)) {
-                            return;
+                            sawStalledItem = true;
                         }
                         continue;
                     }
@@ -257,6 +281,9 @@ public class CodexQueueService extends Service {
                     }
                     archiveSentQueuedItem(queue.threadId, item, sentStage, sentDetail);
                     removeQueuedItem(queue.threadId, item.id);
+                    if ("Completed".equalsIgnoreCase(sentStage)) {
+                        NotificationHelper.showTurnCompletedNotification(this, queue.threadId, "");
+                    }
                     lastStatus = sentDetail;
                     broadcastQueueChanged(queue.threadId, item, sentStage, lastStatus, false);
                     break;
@@ -265,7 +292,7 @@ public class CodexQueueService extends Service {
                     Log.w(TAG, "Queue pass failed for " + queue.threadId, error);
                     broadcastQueueChanged(queue.threadId, item, "Error", lastStatus, true);
                     if (recordFailureAndShouldPause(queue.threadId, item.id, lastStatus)) {
-                        return;
+                        sawStalledItem = true;
                     }
                 }
             }
@@ -275,6 +302,11 @@ public class CodexQueueService extends Service {
             } else if (sawBusyThread) {
                 updateNotification("Codex Link queue waiting", lastStatus.isEmpty() ? "Waiting for active chats" : lastStatus);
                 sleepFor(15000);
+            } else if (sawStalledItem) {
+                updateNotification("Codex Link queue needs attention", lastStatus.isEmpty() ? "A queued message needs edit, delete, or Try now" : lastStatus);
+                broadcastQueueChanged("", lastStatus.isEmpty() ? "A queued message needs edit, delete, or Try now." : lastStatus, true);
+                stopForegroundAndSelf();
+                return;
             } else {
                 updateNotification("Codex Link queue retrying", lastStatus.isEmpty() ? "Queued sends could not complete" : lastStatus);
                 sleepFor(30000);
@@ -294,8 +326,24 @@ public class CodexQueueService extends Service {
         if (count < MAX_FAILURES_BEFORE_PAUSE) {
             return false;
         }
-        pauseQueue("Queue stalled after " + count + " failed attempts. " + cleanDetail);
+        updateNotification("Codex Link queue item stalled", "Use Edit, Delete, or Try now for the failed queued message.");
         return true;
+    }
+
+    private boolean isQueueItemStalled(String threadId, String itemId) {
+        String key = failureKey(threadId, itemId);
+        return getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getInt(PREF_QUEUE_FAILURE_PREFIX + key, 0) >= MAX_FAILURES_BEFORE_PAUSE;
+    }
+
+    private String stalledItemDetail(String threadId, String itemId) {
+        String key = failureKey(threadId, itemId);
+        String detail = getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getString(PREF_QUEUE_FAILURE_DETAIL_PREFIX + key, "");
+        if (detail == null || detail.trim().isEmpty()) {
+            return "Queued message stalled. Use Edit, Delete, or Try now.";
+        }
+        return "Queued message stalled. " + detail;
     }
 
     private void clearFailure(String threadId, String itemId) {
@@ -333,6 +381,15 @@ public class CodexQueueService extends Service {
 
     private boolean isQueuePaused() {
         return getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_QUEUE_PAUSED, false);
+    }
+
+    private boolean isQueueItemBeingEdited(String threadId, String itemId) {
+        if (threadId == null || threadId.isEmpty() || itemId == null || itemId.isEmpty()) {
+            return false;
+        }
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        return threadId.equals(prefs.getString(PREF_EDITING_QUEUE_THREAD_ID, ""))
+                && itemId.equals(prefs.getString(PREF_EDITING_QUEUE_ITEM_ID, ""));
     }
 
     private String queuePausedDetail() {
@@ -492,6 +549,10 @@ public class CodexQueueService extends Service {
         connection.setDoOutput(true);
         connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
         connection.setRequestProperty("Accept", "application/json");
+        String requestId = payload.optString("androidRequestId", payload.optString("clientRequestId", ""));
+        if (!requestId.isEmpty()) {
+            connection.setRequestProperty("X-Codex-Link-Request-Id", requestId);
+        }
         if (token != null && !token.isEmpty()) {
             connection.setRequestProperty("Authorization", "Bearer " + token);
         }
@@ -506,6 +567,21 @@ public class CodexQueueService extends Service {
         String response = readResponse(connection, status);
         connection.disconnect();
         return new HttpResult(status, response);
+    }
+
+    private static void ensurePayloadRequestId(JSONObject payload, String requestId) {
+        if (payload == null || requestId == null || requestId.trim().isEmpty()) {
+            return;
+        }
+        try {
+            if (payload.optString("androidRequestId", "").isEmpty()) {
+                payload.put("androidRequestId", requestId);
+            }
+            if (payload.optString("clientRequestId", "").isEmpty()) {
+                payload.put("clientRequestId", requestId);
+            }
+        } catch (JSONException ignored) {
+        }
     }
 
     private boolean isProcessingResponse(HttpResult result) {
@@ -692,6 +768,7 @@ public class CodexQueueService extends Service {
             }
             try (FileOutputStream output = new FileOutputStream(file, false)) {
                 output.write(array.toString().getBytes(StandardCharsets.UTF_8));
+                NotificationHelper.showTurnCompletedNotification(this, threadId, "");
             } catch (Exception error) {
                 Log.w(TAG, "Could not mark queue history completed for " + threadId, error);
             }
@@ -759,6 +836,25 @@ public class CodexQueueService extends Service {
         if (path == null || path.isEmpty() || "/".equals(path)) {
             return "/";
         }
+        String cleanPath = path.endsWith("/") && path.length() > 1
+                ? path.substring(0, path.length() - 1)
+                : path;
+        if (cleanPath.equals("/codex-link/index.php") || cleanPath.startsWith("/codex-link/index.php/")) {
+            return "/codex-link/index.php/";
+        }
+        if (cleanPath.equals("/codex")) {
+            return "/codex/";
+        }
+        if (cleanPath.startsWith("/codex/")) {
+            String remainder = cleanPath.substring("/codex/".length());
+            if (isApiRouteSegment(firstPathSegment(remainder))) {
+                return "/codex/";
+            }
+        }
+        String firstSegment = firstPathSegment(cleanPath.startsWith("/") ? cleanPath.substring(1) : cleanPath);
+        if (isApiRouteSegment(firstSegment)) {
+            return "/";
+        }
         int lastSlash = path.lastIndexOf('/');
         String lastSegment = lastSlash >= 0 ? path.substring(lastSlash + 1) : path;
         if ("link".equals(lastSegment) || "catalog".equals(lastSegment)) {
@@ -768,6 +864,25 @@ public class CodexQueueService extends Service {
             return path;
         }
         return path + "/";
+    }
+
+    private String firstPathSegment(String path) {
+        if (path == null || path.isEmpty()) {
+            return "";
+        }
+        int slash = path.indexOf('/');
+        return slash >= 0 ? path.substring(0, slash) : path;
+    }
+
+    private boolean isApiRouteSegment(String segment) {
+        if (segment == null) {
+            return false;
+        }
+        return "link".equals(segment)
+                || "catalog".equals(segment)
+                || "threads".equals(segment)
+                || "health".equals(segment)
+                || "server-health".equals(segment);
     }
 
     private String normalizeEndpoint(String endpoint, boolean webMode) {

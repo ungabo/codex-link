@@ -39,6 +39,7 @@ MAX_LIVE_EVENT_TEXT = 900
 UPLOAD_ROOT = PROJECT_ROOT / "desktop_bridge" / "uploaded_images"
 CHECKPOINTS_PATH = PROJECT_ROOT / "desktop_bridge" / "checkpoints.json"
 PROJECT_MAPPINGS_PATH = PROJECT_ROOT / "desktop_bridge" / "project_mappings.json"
+PHONE_REQUESTS_PATH = PROJECT_ROOT / "desktop_bridge" / "phone_requests.json"
 CODEX_TRANSCRIPT_ROOT = Path.home() / "Documents" / "Codex"
 MAX_DIFF_CHARS = 80_000
 MAX_PROJECT_FILE_BYTES = 120 * 1024 * 1024
@@ -145,6 +146,7 @@ IMAGE_REF_RE = re.compile(
 )
 IMAGE_PLACEHOLDER_RE = re.compile(r"<image\s+name=\[?([^\]\n>]+)\]?>", re.IGNORECASE)
 TURN_LOCK = threading.Lock()
+PHONE_REQUESTS_LOCK = threading.Lock()
 
 mimetypes.add_type("application/vnd.android.package-archive", ".apk")
 
@@ -226,6 +228,93 @@ def mapped_project_roots() -> list[str]:
             seen.add(key)
             unique.append(root)
     return unique
+
+
+def request_id_from_payload(payload: dict[str, Any], headers: Any) -> str:
+    header_value = ""
+    try:
+        header_value = str(headers.get("X-Codex-Link-Request-Id") or "")
+    except Exception:
+        header_value = ""
+    request_id = str(
+        payload.get("androidRequestId")
+        or payload.get("clientRequestId")
+        or payload.get("requestId")
+        or header_value
+        or ""
+    ).strip()
+    return re.sub(r"[^A-Za-z0-9._:-]+", "_", request_id)[:160]
+
+
+def phone_request_key(kind: str, thread_id: str, request_id: str) -> str:
+    raw = f"{kind}:{thread_id}:{request_id}"
+    return re.sub(r"[^A-Za-z0-9._:-]+", "_", raw)[:260]
+
+
+def load_phone_requests() -> dict[str, Any]:
+    if not PHONE_REQUESTS_PATH.exists():
+        return {}
+    try:
+        data = json.loads(PHONE_REQUESTS_PATH.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def lookup_phone_request(kind: str, thread_id: str, request_id: str) -> dict[str, Any] | None:
+    if not request_id:
+        return None
+    key = phone_request_key(kind, thread_id, request_id)
+    with PHONE_REQUESTS_LOCK:
+        record = load_phone_requests().get(key)
+    return record if isinstance(record, dict) else None
+
+
+def record_phone_request(
+    kind: str,
+    thread_id: str,
+    request_id: str,
+    response: dict[str, Any],
+    status: int,
+) -> None:
+    if not request_id:
+        return
+    key = phone_request_key(kind, thread_id, request_id)
+    record = {
+        "kind": kind,
+        "threadId": thread_id,
+        "requestId": request_id,
+        "status": status,
+        "response": response,
+        "updatedAt": datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    with PHONE_REQUESTS_LOCK:
+        data = load_phone_requests()
+        data[key] = record
+        items = sorted(
+            data.items(),
+            key=lambda item: str(item[1].get("updatedAt", "")) if isinstance(item[1], dict) else "",
+        )
+        data = dict(items[-300:])
+        PHONE_REQUESTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        PHONE_REQUESTS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def duplicate_phone_response(record: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    response = record.get("response")
+    if not isinstance(response, dict):
+        response = {
+            "ok": True,
+            "accepted": True,
+            "completed": False,
+            "status": "processing",
+            "message": "This Android request was already received by Windows.",
+        }
+    response = dict(response)
+    response["duplicate"] = True
+    response["message"] = response.get("message") or "This Android request was already received by Windows."
+    status = int(record.get("status") or (202 if response.get("accepted") and not response.get("completed", True) else 200))
+    return response, status
 
 
 def is_codex_transcript_cwd(cwd: str) -> bool:
@@ -440,13 +529,20 @@ def load_session_index_names(codex_home: Path) -> dict[str, str]:
     return names
 
 
-def is_subagent_thread(row: sqlite3.Row) -> bool:
-    thread_source = str(row["thread_source"] or "").lower()
-    source = str(row["source"] or "").lower()
+def row_value(row: Any, key: str, default: Any = None) -> Any:
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
+def is_subagent_thread(row: sqlite3.Row | dict[str, Any]) -> bool:
+    thread_source = str(row_value(row, "thread_source", "") or "").lower()
+    source = str(row_value(row, "source", "") or "").lower()
     return (
         thread_source == "subagent"
-        or bool(row["agent_nickname"])
-        or bool(row["agent_role"])
+        or bool(row_value(row, "agent_nickname", ""))
+        or bool(row_value(row, "agent_role", ""))
         or '"subagent"' in source
     )
 
@@ -558,6 +654,7 @@ def load_threads(codex_home: Path, global_state: dict[str, Any]) -> tuple[list[d
     pinned_thread_ids = set(global_state.get("pinned-thread-ids") or [])
     rows: list[dict[str, Any]] = []
     hidden_subagents = 0
+    seen_thread_ids: set[str] = set()
     connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
@@ -575,6 +672,7 @@ def load_threads(codex_home: Path, global_state: dict[str, Any]) -> tuple[list[d
             if is_subagent_thread(row):
                 hidden_subagents += 1
                 continue
+            seen_thread_ids.add(str(row["id"]))
 
             updated_ms = row["updated_at_ms"] or (row["updated_at"] * 1000 if row["updated_at"] else None)
             original_title = row["title"] or "Untitled chat"
@@ -612,6 +710,49 @@ def load_threads(codex_home: Path, global_state: dict[str, Any]) -> tuple[list[d
             )
     finally:
         connection.close()
+
+    for row in session_rollout_thread_rows(codex_home):
+        thread_id = str(row["id"])
+        if thread_id in seen_thread_ids:
+            continue
+        if is_subagent_thread(row):
+            hidden_subagents += 1
+            continue
+        seen_thread_ids.add(thread_id)
+        updated_ms = row["updated_at_ms"] or (row["updated_at"] * 1000 if row["updated_at"] else None)
+        original_title = row["title"] or "Phone-created chat"
+        display_title = session_names.get(thread_id) or original_title
+        rollout_path = Path(clean_windows_path(row["rollout_path"]))
+        activity = thread_activity_for_path(rollout_path)
+        original_cwd = clean_windows_path(row["cwd"])
+        root_info = project_root_info(codex_home, thread_id, original_cwd)
+        rows.append(
+            {
+                "id": thread_id,
+                "title": display_title,
+                "displayTitle": display_title,
+                "originalTitle": original_title,
+                "cwd": root_info["cwd"],
+                "projectPath": root_info["projectPath"],
+                "chatPath": root_info["chatPath"],
+                "originalCwd": root_info["originalCwd"],
+                "projectRootSource": root_info["projectRootSource"],
+                "projectRootError": root_info["projectRootError"],
+                "updatedAt": iso_from_ms(updated_ms),
+                "updatedAtMs": updated_ms,
+                "archived": False,
+                "threadSource": row["thread_source"] or "user",
+                "source": row["source"],
+                "preview": row["preview"] or "",
+                "pinned": thread_id in pinned_thread_ids,
+                "status": activity["status"],
+                "active": activity["active"],
+                "staleActive": activity.get("staleActive", False),
+                "staleReason": activity.get("staleReason", ""),
+                "activeTurnId": activity.get("activeTurnId", ""),
+                "activeStartedAt": activity.get("activeStartedAt", ""),
+            }
+        )
     rows.sort(key=lambda thread: (not thread.get("pinned", False), -(thread.get("updatedAtMs") or 0)))
     return rows, hidden_subagents
 
@@ -629,6 +770,95 @@ def collect_message_text(content: Any) -> str:
             if isinstance(text, str) and text.strip():
                 parts.append(text.strip())
     return "\n\n".join(parts).strip()
+
+
+def rollout_thread_id_from_path(path: Path) -> str:
+    stem = path.stem
+    if "-" not in stem:
+        return ""
+    return stem.rsplit("-", 1)[-1]
+
+
+def find_session_rollout_path(codex_home: Path, thread_id: str) -> Path | None:
+    sessions_dir = codex_home / "sessions"
+    if not sessions_dir.exists() or not thread_id:
+        return None
+    matches = sorted(
+        sessions_dir.rglob(f"*{thread_id}.jsonl"),
+        key=lambda item: item.stat().st_mtime if item.exists() else 0,
+        reverse=True,
+    )
+    return matches[0] if matches else None
+
+
+def rollout_fallback_row(rollout_path: Path, thread_id: str) -> dict[str, Any]:
+    cwd = ""
+    source = "vscode"
+    thread_source = "user"
+    title = "Phone-created chat"
+    preview = ""
+    agent_nickname = ""
+    agent_role = ""
+    created_at = 0.0
+    try:
+        with rollout_path.open("r", encoding="utf-8", errors="replace") as handle:
+            for index, line in enumerate(handle):
+                if index > 250 and preview:
+                    break
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                if event.get("type") == "session_meta":
+                    cwd = clean_windows_path(str(payload.get("cwd") or cwd))
+                    source = str(payload.get("source") or source)
+                    thread_source = str(payload.get("thread_source") or thread_source)
+                    agent_nickname = str(payload.get("agent_nickname") or agent_nickname)
+                    agent_role = str(payload.get("agent_role") or agent_role)
+                    created_at = seconds_from_timestamp(str(payload.get("timestamp") or "")) or created_at
+                elif event.get("type") == "response_item" and payload.get("type") == "message" and payload.get("role") == "user":
+                    text = collect_message_text(payload.get("content"))
+                    if text and not text.startswith("<environment_context>"):
+                        preview = text
+                        title = text.splitlines()[0][:90] or title
+                        break
+    except OSError:
+        pass
+
+    updated_ms = int(rollout_path.stat().st_mtime * 1000) if rollout_path.exists() else None
+    updated_at = int((updated_ms or 0) / 1000) if updated_ms else None
+    if created_at and not updated_ms:
+        updated_at = int(created_at)
+        updated_ms = int(created_at * 1000)
+    return {
+        "id": thread_id,
+        "title": title,
+        "cwd": cwd,
+        "updated_at_ms": updated_ms,
+        "updated_at": updated_at,
+        "archived": False,
+        "thread_source": thread_source,
+        "source": source,
+        "preview": preview,
+        "agent_nickname": agent_nickname,
+        "agent_role": agent_role,
+        "rollout_path": str(rollout_path),
+    }
+
+
+def session_rollout_thread_rows(codex_home: Path) -> list[dict[str, Any]]:
+    sessions_dir = codex_home / "sessions"
+    if not sessions_dir.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for rollout_path in sessions_dir.rglob("rollout-*.jsonl"):
+        thread_id = rollout_thread_id_from_path(rollout_path)
+        if thread_id:
+            rows.append(rollout_fallback_row(rollout_path, thread_id))
+    return rows
 
 
 def compact_live_text(value: Any, max_chars: int = MAX_LIVE_EVENT_TEXT) -> str:
@@ -1839,6 +2069,12 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
         if path in {"/threads", "/codex/threads"}:
             try:
                 payload = self.read_json_body()
+                request_id = request_id_from_payload(payload, self.headers)
+                duplicate = lookup_phone_request("thread-start", "", request_id)
+                if duplicate is not None:
+                    response, status = duplicate_phone_response(duplicate)
+                    self.write_json(response, status=status)
+                    return
                 requested_cwd = str(payload.get("cwd") or "").strip() or default_cwd(self.codex_home)
                 if is_codex_transcript_cwd(requested_cwd):
                     raise ValueError(
@@ -1863,6 +2099,7 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
             finally:
                 TURN_LOCK.release()
 
+            record_phone_request("thread-start", "", request_id, result, 200)
             self.write_json(result)
             return
 
@@ -1943,6 +2180,12 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
             except ValueError as error:
                 self.write_json({"error": str(error)}, status=400)
                 return
+            request_id = request_id_from_payload(payload, self.headers)
+            duplicate = lookup_phone_request("turn", thread_id, request_id)
+            if duplicate is not None:
+                response, status = duplicate_phone_response(duplicate)
+                self.write_json(response, status=status)
+                return
 
             prompt = str(payload.get("prompt") or "").strip()
             images = payload.get("images")
@@ -2008,12 +2251,14 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
             except subprocess.TimeoutExpired as error:
                 activity = thread_activity_for_path(rollout_path, tail_only=False)
                 if activity.get("active"):
+                    response = turn_processing_response(
+                        thread_id,
+                        activity,
+                        "Request was accepted, but Codex is still processing.",
+                    )
+                    record_phone_request("turn", thread_id, request_id, response, 202)
                     self.write_json(
-                        turn_processing_response(
-                            thread_id,
-                            activity,
-                            "Request was accepted, but Codex is still processing.",
-                        ),
+                        response,
                         status=202,
                     )
                 else:
@@ -2026,12 +2271,14 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
                 if is_turn_timeout_error(error):
                     activity = thread_activity_for_path(rollout_path, tail_only=False)
                     if activity.get("active"):
+                        response = turn_processing_response(
+                            thread_id,
+                            activity,
+                            "Request was accepted, but Codex is still processing.",
+                        )
+                        record_phone_request("turn", thread_id, request_id, response, 202)
                         self.write_json(
-                            turn_processing_response(
-                                thread_id,
-                                activity,
-                                "Request was accepted, but Codex is still processing.",
-                            ),
+                            response,
                             status=202,
                         )
                         return
@@ -2043,6 +2290,7 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
             if checkpoint_result is not None:
                 result["checkpoint"] = checkpoint_result
             response_status = 202 if result.get("accepted") and not result.get("completed", True) else 200
+            record_phone_request("turn", thread_id, request_id, result, response_status)
             self.write_json(result, status=response_status)
             return
 
