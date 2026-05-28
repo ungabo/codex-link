@@ -10,6 +10,7 @@ if (localPropertiesFile.exists()) {
 def defaultWebToken = providers.gradleProperty("codexLinkDefaultWebToken")
         .orElse(localProperties.getProperty("codexLinkDefaultWebToken", ""))
         .get()
+def buildStamp = new Date().format("MMM d, h:mm a", TimeZone.getTimeZone("America/New_York"))
 
 android {
     namespace = "com.codexlink.android"
@@ -23,9 +24,10 @@ android {
         applicationId = "com.codexlink.android"
         minSdk = 26
         targetSdk = 36
-        versionCode = 39
-        versionName = "0.1.40"
+        versionCode = 48
+        versionName = "0.1.49"
         buildConfigField "String", "CODEX_LINK_DEFAULT_WEB_TOKEN", "\"${defaultWebToken.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+        buildConfigField "String", "CODEX_LINK_BUILD_STAMP", "\"${buildStamp}\""
     }
 
     compileOptions {

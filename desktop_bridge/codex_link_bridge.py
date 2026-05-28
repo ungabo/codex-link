@@ -591,15 +591,28 @@ def thread_activity_for_path(rollout_path: Path, *, tail_only: bool = True) -> d
             if not turn_id:
                 continue
 
+            if turn_id in active_turns and timestamp:
+                active_turns[turn_id]["lastEventAt"] = timestamp
+                parsed_timestamp = seconds_from_timestamp(timestamp)
+                if parsed_timestamp:
+                    active_turns[turn_id]["lastEventSeconds"] = parsed_timestamp
+
             if event_type == "task_started":
                 try:
                     started_seconds = float(payload.get("started_at") or 0)
                 except (TypeError, ValueError):
                     started_seconds = 0
+                # Codex threads run one visible turn at a time. Some app-server
+                # phone turns can leave a task_started marker without a later
+                # task_complete marker, so a newer task_started supersedes older
+                # active markers for status purposes.
+                active_turns.clear()
                 active_turns[turn_id] = {
                     "turnId": turn_id,
                     "startedAt": iso_from_seconds(payload.get("started_at")) or timestamp,
                     "startedSeconds": started_seconds,
+                    "lastEventAt": timestamp,
+                    "lastEventSeconds": last_event_seconds,
                 }
             elif event_type in {"task_complete", "task_failed", "task_cancelled", "task_canceled"}:
                 active_turns.pop(turn_id, None)
@@ -613,6 +626,8 @@ def thread_activity_for_path(rollout_path: Path, *, tail_only: bool = True) -> d
 
     active = next(reversed(active_turns.values()))
     started_seconds = float(active.get("startedSeconds") or 0)
+    active_last_event_at = str(active.get("lastEventAt") or last_event_at)
+    active_last_event_seconds = float(active.get("lastEventSeconds") or last_event_seconds or 0)
     now_seconds = datetime.now(tz=timezone.utc).timestamp()
     if started_seconds and now_seconds - started_seconds > ACTIVE_TURN_STALE_SECONDS:
         return {
@@ -623,8 +638,9 @@ def thread_activity_for_path(rollout_path: Path, *, tail_only: bool = True) -> d
             "activeTurnId": active.get("turnId", ""),
             "activeStartedAt": active.get("startedAt", ""),
             "lastEventAt": last_event_at,
+            "activeLastEventAt": active_last_event_at,
         }
-    if last_event_seconds and now_seconds - last_event_seconds > ACTIVE_TURN_QUIET_STALE_SECONDS:
+    if active_last_event_seconds and now_seconds - active_last_event_seconds > ACTIVE_TURN_QUIET_STALE_SECONDS:
         return {
             "status": "idle",
             "active": False,
@@ -633,6 +649,7 @@ def thread_activity_for_path(rollout_path: Path, *, tail_only: bool = True) -> d
             "activeTurnId": active.get("turnId", ""),
             "activeStartedAt": active.get("startedAt", ""),
             "lastEventAt": last_event_at,
+            "activeLastEventAt": active_last_event_at,
         }
 
     return {
@@ -642,6 +659,7 @@ def thread_activity_for_path(rollout_path: Path, *, tail_only: bool = True) -> d
         "activeStartedAt": active.get("startedAt", ""),
         "activeCount": len(active_turns),
         "lastEventAt": last_event_at,
+        "activeLastEventAt": active_last_event_at,
     }
 
 
@@ -1332,20 +1350,38 @@ def load_catalog(codex_home: Path) -> dict[str, Any]:
     }
 
 
+def kill_process_tree(process: subprocess.Popen[str]) -> None:
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    else:
+        process.kill()
+
+
 def run_process(command: list[str], *, cwd: Path | str | None = None, timeout: int = 30) -> dict[str, Any]:
-    completed = subprocess.run(
+    process = subprocess.Popen(
         command,
         cwd=cwd,
         text=True,
         encoding="utf-8",
         errors="replace",
-        capture_output=True,
-        timeout=timeout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        kill_process_tree(process)
+        stdout, stderr = process.communicate(timeout=5)
+        raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr) from error
     return {
-        "exitCode": completed.returncode,
-        "stdout": completed.stdout.rstrip("\r\n"),
-        "stderr": completed.stderr.rstrip("\r\n"),
+        "exitCode": process.returncode,
+        "stdout": stdout.rstrip("\r\n"),
+        "stderr": stderr.rstrip("\r\n"),
     }
 
 
@@ -1357,7 +1393,7 @@ def git_binary() -> str:
 
 
 def git_output(args: list[str], cwd: str | Path, *, timeout: int = 30, allow_error: bool = False) -> str:
-    result = run_process([git_binary(), "-C", str(cwd), *args], timeout=timeout)
+    result = run_process([git_binary(), "-c", "maintenance.auto=false", "-C", str(cwd), *args], timeout=timeout)
     if result["exitCode"] != 0 and not allow_error:
         detail = result["stderr"] or result["stdout"] or f"git exited {result['exitCode']}"
         raise RuntimeError(detail)
@@ -1689,6 +1725,7 @@ def git_checkpoint(cwd: str, thread_id: str | None = None, label: str = "manual"
                 "-c",
                 "user.email=codex-link@local",
                 "commit",
+                "--no-verify",
                 "-m",
                 f"Codex Link checkpoint ({safe_label}) {stamp}",
             ],

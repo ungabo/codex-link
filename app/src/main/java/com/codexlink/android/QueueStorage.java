@@ -3,6 +3,8 @@ package com.codexlink.android;
 import android.util.Log;
 
 import org.json.JSONArray;
+import org.json.JSONObject;
+import org.json.JSONTokener;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -30,7 +32,24 @@ final class QueueStorage {
             while ((read = input.read(buffer)) != -1) {
                 output.write(buffer, 0, read);
             }
-            return new JSONArray(output.toString(StandardCharsets.UTF_8.name()));
+            String raw = output.toString(StandardCharsets.UTF_8.name());
+            Object parsed = new JSONTokener(raw).nextValue();
+            if (parsed instanceof JSONArray) {
+                return (JSONArray) parsed;
+            }
+            if (parsed instanceof JSONObject) {
+                JSONArray salvaged = new JSONArray();
+                salvaged.put(parsed);
+                Log.w(TAG, "Salvaged single queued item from " + file.getName());
+                try {
+                    writeArrayAtomic(file, salvaged);
+                } catch (IOException error) {
+                    Log.w(TAG, "Could not normalize salvaged queue " + file.getName(), error);
+                }
+                return salvaged;
+            }
+            Log.w(TAG, "Queue JSON was not an array in " + file.getName());
+            return new JSONArray();
         } catch (Exception error) {
             Log.w(TAG, "Could not read queue JSON " + file.getName(), error);
             return new JSONArray();

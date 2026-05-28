@@ -82,6 +82,72 @@ function relay_count_files(string $dir): int {
     return $files === false ? 0 : count($files);
 }
 
+function relay_processing_stale_seconds(): int {
+    return defined('PROCESSING_STALE_SECONDS') ? (int)PROCESSING_STALE_SECONDS : 180;
+}
+
+function relay_processing_jobs(string $dir): array {
+    $files = glob($dir . '/*.json') ?: [];
+    sort($files, SORT_STRING);
+    $jobs = [];
+    $now = time();
+    foreach ($files as $file) {
+        $raw = file_get_contents($file);
+        $job = json_decode($raw === false ? '' : $raw, true);
+        if (!is_array($job)) {
+            continue;
+        }
+        $createdAt = (string)($job['createdAt'] ?? '');
+        $createdAtSeconds = $createdAt === '' ? false : strtotime($createdAt);
+        if ($createdAtSeconds === false) {
+            $createdAtSeconds = @filemtime($file);
+        }
+        $age = $createdAtSeconds === false ? null : max(0, $now - $createdAtSeconds);
+        $jobs[] = [
+            'id' => (string)($job['id'] ?? basename($file, '.json')),
+            'createdAt' => $createdAt,
+            'ageSeconds' => $age,
+            'method' => (string)($job['method'] ?? ''),
+            'route' => (string)($job['route'] ?? '')
+        ];
+    }
+    return $jobs;
+}
+
+function relay_fail_stale_processing(string $processingDir, string $resultsDir): void {
+    $files = glob($processingDir . '/*.json') ?: [];
+    $cutoff = time() - relay_processing_stale_seconds();
+    foreach ($files as $file) {
+        $mtime = @filemtime($file);
+        if ($mtime === false || $mtime >= $cutoff) {
+            continue;
+        }
+        $raw = file_get_contents($file);
+        $job = json_decode($raw === false ? '' : $raw, true);
+        if (!is_array($job)) {
+            @unlink($file);
+            continue;
+        }
+        $id = preg_replace('/[^A-Za-z0-9._-]/', '', (string)($job['id'] ?? basename($file, '.json')));
+        if ($id === '') {
+            @unlink($file);
+            continue;
+        }
+        $body = json_encode([
+            'ok' => false,
+            'error' => 'Windows tunnel stalled before completing this request. The queued message is still on the phone; use Try now after the tunnel is healthy.'
+        ], JSON_UNESCAPED_SLASHES);
+        $result = [
+            'id' => $id,
+            'status' => 504,
+            'contentType' => 'application/json; charset=utf-8',
+            'bodyBase64' => base64_encode($body === false ? '{}' : $body)
+        ];
+        file_put_contents($resultsDir . '/' . $id . '.json', json_encode($result, JSON_UNESCAPED_SLASHES), LOCK_EX);
+        @unlink($file);
+    }
+}
+
 function relay_wait_for_result(string $jobId): void {
     if (function_exists('set_time_limit')) {
         @set_time_limit(PHONE_WAIT_SECONDS + 15);
@@ -132,6 +198,24 @@ function relay_wait_for_result(string $jobId): void {
 
 $route = relay_route();
 if ($route === '/server-health') {
+    $jobsDir = relay_data_dir('jobs');
+    $processingDir = relay_data_dir('processing');
+    $resultsDir = relay_data_dir('results');
+    relay_fail_stale_processing($processingDir, $resultsDir);
+    $health = [
+        'ok' => true,
+        'source' => 'codex-link-relay',
+        'jobs' => relay_count_files($jobsDir),
+        'processing' => relay_count_files($processingDir),
+        'generatedAt' => gmdate('c')
+    ];
+    if (relay_phone_auth_error(relay_token()) === '') {
+        $health['processingJobs'] = relay_processing_jobs($processingDir);
+    }
+    relay_json($health);
+}
+
+if ($route === '/server-health-public') {
     relay_json([
         'ok' => true,
         'source' => 'codex-link-relay',
@@ -150,6 +234,8 @@ $authError = relay_phone_auth_error(relay_token());
 if ($authError !== '') {
     relay_json(['ok' => false, 'error' => $authError], 401);
 }
+
+relay_fail_stale_processing(relay_data_dir('processing'), relay_data_dir('results'));
 
 $jobId = relay_job_id();
 $job = [

@@ -45,6 +45,7 @@ public class CodexQueueService extends Service {
     static final String EXTRA_STATUS = "status";
     static final String EXTRA_ERROR = "error";
     static final String EXTRA_REQUEST_ID = "request_id";
+    static final String EXTRA_REQUEST_TURN_ID = "request_turn_id";
     static final String EXTRA_REQUEST_STAGE = "request_stage";
     static final String EXTRA_REQUEST_SUMMARY = "request_summary";
 
@@ -66,7 +67,7 @@ public class CodexQueueService extends Service {
     private static final String DEFAULT_WEB_ENDPOINT = "https://www.sitesindevelopment.com/codex-link/index.php/link";
     private static final String DEFAULT_WEB_TOKEN = BuildConfig.CODEX_LINK_DEFAULT_WEB_TOKEN;
     private static final int NOTIFICATION_ID = 18766;
-    private static final int READ_TIMEOUT_MS = 300000;
+    private static final int READ_TIMEOUT_MS = 120000;
     private static final int CONNECT_TIMEOUT_MS = 10000;
     private static final int MAX_FAILURES_BEFORE_PAUSE = 3;
 
@@ -196,10 +197,15 @@ public class CodexQueueService extends Service {
         while (!stopRequested) {
             if (isQueuePaused()) {
                 String detail = queuePausedDetail();
-                broadcastQueueChanged("", detail.isEmpty() ? "Queue paused. Tap Resume queue to continue." : detail, false);
-                updateNotification("Codex Link queue paused", detail.isEmpty() ? "Tap Resume queue to continue" : detail);
-                stopForegroundAndSelf();
-                return;
+                if (isRecoverablePausedQueue(detail)) {
+                    setQueuePaused(false, "");
+                    broadcastQueueChanged("", "Queue resumed after stale state recovery.", false);
+                } else {
+                    broadcastQueueChanged("", detail.isEmpty() ? "Queue paused. Tap Resume queue to continue." : detail, false);
+                    updateNotification("Codex Link queue paused", detail.isEmpty() ? "Tap Resume queue to continue" : detail);
+                    stopForegroundAndSelf();
+                    return;
+                }
             }
             EndpointConfig config = endpointConfig();
             if (config.endpoint.isEmpty()) {
@@ -257,10 +263,13 @@ public class CodexQueueService extends Service {
                     ThreadState state = loadThreadState(config, queue.threadId);
                     Log.i(TAG, "Queue thread " + queue.threadId + " active=" + state.active);
                     if (state.staleActive) {
-                        lastStatus = staleStatusText(state) + " Queue paused so it does not resend the same item in a loop.";
-                        broadcastQueueChanged(queue.threadId, item, "Error", lastStatus, true);
-                        pauseQueue(lastStatus);
-                        return;
+                        sawStalledItem = true;
+                        lastStatus = staleStatusText(state);
+                        markThreadProcessingHistoryCompleted(
+                                queue.threadId,
+                                "Windows reported stale processing. The phone preserved queued messages and stopped automatic retries.");
+                        broadcastQueueChanged(queue.threadId, item, "Stalled", lastStatus, true);
+                        continue;
                     }
                     if (state.active) {
                         sawBusyThread = true;
@@ -298,6 +307,7 @@ public class CodexQueueService extends Service {
                     clearFailure(queue.threadId, item.id);
                     String sentStage;
                     String sentDetail;
+                    String acceptedTurnId = turnIdFromTurnResponse(result.body);
                     if (isProcessingResponse(result)) {
                         sentStage = "Processing";
                         sentDetail = "Received by Windows once and removed from the phone queue. Waiting for Windows to finish.";
@@ -305,13 +315,13 @@ public class CodexQueueService extends Service {
                         sentStage = "Completed";
                         sentDetail = "Received by Windows and completed by Codex.";
                     }
-                    archiveSentQueuedItem(queue.threadId, item, sentStage, sentDetail);
+                    archiveSentQueuedItem(queue.threadId, item, sentStage, sentDetail, acceptedTurnId);
                     removeQueuedItem(queue.threadId, item.id);
                     if ("Completed".equalsIgnoreCase(sentStage)) {
                         NotificationHelper.showTurnCompletedNotification(this, queue.threadId, "");
                     }
                     lastStatus = sentDetail;
-                    broadcastQueueChanged(queue.threadId, item, sentStage, lastStatus, false);
+                    broadcastQueueChanged(queue.threadId, item, sentStage, lastStatus, false, acceptedTurnId);
                     break;
                 } catch (Exception error) {
                     lastStatus = error.getMessage() == null ? "Queued send failed." : error.getMessage();
@@ -325,12 +335,12 @@ public class CodexQueueService extends Service {
 
             if (madeProgress) {
                 sleepFor(2500);
-            } else if (sawBusyThread) {
-                updateNotification("Codex Link queue waiting", lastStatus.isEmpty() ? "Waiting for active chats" : lastStatus);
-                sleepFor(15000);
             } else if (sawStalledItem) {
                 pauseQueue(lastStatus.isEmpty() ? "A queued message needs edit, delete, or Try now." : lastStatus);
                 return;
+            } else if (sawBusyThread) {
+                updateNotification("Codex Link queue waiting", lastStatus.isEmpty() ? "Waiting for active chats" : lastStatus);
+                sleepFor(15000);
             } else {
                 updateNotification("Codex Link queue retrying", lastStatus.isEmpty() ? "Queued sends could not complete" : lastStatus);
                 sleepFor(30000);
@@ -420,6 +430,12 @@ public class CodexQueueService extends Service {
         return getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_QUEUE_STALLED_DETAIL, "");
     }
 
+    private boolean isRecoverablePausedQueue(String detail) {
+        String lower = detail == null ? "" : detail.toLowerCase(Locale.US);
+        return lower.contains("queue preserved after qa")
+                || lower.contains("queue paused so it does not resend");
+    }
+
     private void setQueuePaused(boolean paused, String detail) {
         getSharedPreferences(PREFS, MODE_PRIVATE)
                 .edit()
@@ -453,6 +469,10 @@ public class CodexQueueService extends Service {
                 thread.optString("status", activity == null ? "" : activity.optString("status", "")),
                 thread.optString("activeTurnId", activity == null ? "" : activity.optString("activeTurnId", "")),
                 thread.optString("activeStartedAt", activity == null ? "" : activity.optString("activeStartedAt", "")),
+                activity == null
+                        ? thread.optString("updatedAt", "")
+                        : activity.optString("activeLastEventAt", activity.optString("lastEventAt", thread.optString("updatedAt", ""))),
+                response.optString("generatedAt", ""),
                 activity == null ? 0 : activity.optInt("activeCount", 0));
     }
 
@@ -463,15 +483,19 @@ public class CodexQueueService extends Service {
         final String status;
         final String activeTurnId;
         final String activeStartedAt;
+        final String lastEventAt;
+        final String checkedAt;
         final int activeCount;
 
-        ThreadState(boolean active, boolean staleActive, String staleReason, String status, String activeTurnId, String activeStartedAt, int activeCount) {
+        ThreadState(boolean active, boolean staleActive, String staleReason, String status, String activeTurnId, String activeStartedAt, String lastEventAt, String checkedAt, int activeCount) {
             this.active = active;
             this.staleActive = staleActive;
             this.staleReason = staleReason == null ? "" : staleReason;
             this.status = status == null ? "" : status;
             this.activeTurnId = activeTurnId == null ? "" : activeTurnId;
             this.activeStartedAt = activeStartedAt == null ? "" : activeStartedAt;
+            this.lastEventAt = lastEventAt == null ? "" : lastEventAt;
+            this.checkedAt = checkedAt == null ? "" : checkedAt;
             this.activeCount = activeCount;
         }
     }
@@ -493,6 +517,12 @@ public class CodexQueueService extends Service {
         builder.append("Windows is processing this chat.");
         if (state != null && !state.activeStartedAt.isEmpty()) {
             builder.append(" Processing since ").append(formatIsoForStatus(state.activeStartedAt)).append(".");
+        }
+        if (state != null && !state.lastEventAt.isEmpty()) {
+            builder.append(" Last desktop output ").append(formatIsoForStatus(state.lastEventAt)).append(".");
+        }
+        if (state != null && !state.checkedAt.isEmpty()) {
+            builder.append(" Checked ").append(formatIsoForStatus(state.checkedAt)).append(".");
         }
         builder.append(" Queue will retry when it finishes.");
         return builder.toString();
@@ -652,6 +682,23 @@ public class CodexQueueService extends Service {
         } catch (JSONException ignored) {
         }
         return result.status == 202;
+    }
+
+    private String turnIdFromTurnResponse(String body) {
+        if (body == null || body.trim().isEmpty()) {
+            return "";
+        }
+        try {
+            JSONObject object = new JSONObject(body);
+            String id = object.optString("turnId", "");
+            if (!id.isEmpty()) {
+                return id;
+            }
+            JSONObject turn = object.optJSONObject("turn");
+            return turn == null ? "" : turn.optString("id", "");
+        } catch (JSONException ignored) {
+            return "";
+        }
     }
 
     private boolean shouldRetryWithIncludedWebToken(EndpointConfig config, String endpoint, int status) {
@@ -823,7 +870,7 @@ public class CodexQueueService extends Service {
         }
     }
 
-    private void archiveSentQueuedItem(String threadId, QueueItem item, String stage, String detail) {
+    private void archiveSentQueuedItem(String threadId, QueueItem item, String stage, String detail, String turnId) {
         if (threadId == null || threadId.isEmpty() || item == null) {
             return;
         }
@@ -838,6 +885,7 @@ public class CodexQueueService extends Service {
                         .put("sentAt", System.currentTimeMillis())
                         .put("stage", stage == null || stage.isEmpty() ? "Sent" : stage)
                         .put("detail", detail == null ? "" : detail)
+                        .put("turnId", turnId == null ? "" : turnId)
                         .put("payload", item.payload));
                 JSONArray trimmed = new JSONArray();
                 int start = Math.max(0, array.length() - 50);
@@ -905,8 +953,15 @@ public class CodexQueueService extends Service {
             }
             try {
                 ThreadState state = loadThreadState(config, threadId);
-                if (state.active || state.staleActive) {
+                if (state.active) {
                     sawActive = true;
+                    continue;
+                }
+                if (state.staleActive) {
+                    markThreadProcessingHistoryCompleted(
+                            threadId,
+                            "Windows reported stale processing. The phone stopped treating this old request as active.");
+                    completedAny = true;
                     continue;
                 }
                 markThreadProcessingHistoryCompleted(
@@ -1141,12 +1196,17 @@ public class CodexQueueService extends Service {
     }
 
     private void broadcastQueueChanged(String threadId, QueueItem item, String stage, String status, boolean isError) {
+        broadcastQueueChanged(threadId, item, stage, status, isError, "");
+    }
+
+    private void broadcastQueueChanged(String threadId, QueueItem item, String stage, String status, boolean isError, String turnId) {
         Intent intent = new Intent(ACTION_QUEUE_CHANGED);
         intent.setPackage(getPackageName());
         intent.putExtra(EXTRA_THREAD_ID, threadId == null ? "" : threadId);
         intent.putExtra(EXTRA_STATUS, status == null ? "" : status);
         intent.putExtra(EXTRA_ERROR, isError);
         intent.putExtra(EXTRA_REQUEST_ID, item == null ? "" : item.id);
+        intent.putExtra(EXTRA_REQUEST_TURN_ID, turnId == null ? "" : turnId);
         intent.putExtra(EXTRA_REQUEST_STAGE, stage == null ? "" : stage);
         intent.putExtra(EXTRA_REQUEST_SUMMARY, requestSummary(item));
         sendBroadcast(intent);

@@ -49,7 +49,12 @@ def load_or_create_tunnel_config(test_token_hours: int | None) -> dict[str, obje
     config.setdefault("localBaseUrl", "http://127.0.0.1:18765")
     config.setdefault("localToken", "")
     config.setdefault("pollSeconds", 1.0)
-    config.setdefault("localTimeoutSeconds", 310)
+    config.setdefault("localTimeoutSeconds", 90)
+    config.setdefault("statusTimeoutSeconds", 20)
+    config.setdefault("getTimeoutSeconds", 30)
+    config.setdefault("downloadTimeoutSeconds", 90)
+    config.setdefault("turnTimeoutSeconds", 120)
+    config.setdefault("defaultLocalTimeoutSeconds", 60)
     if test_token_hours is not None:
         expires_at = datetime.now(timezone.utc) + timedelta(hours=test_token_hours)
         config["testPhoneToken"] = secrets.token_urlsafe(32)
@@ -75,7 +80,8 @@ def write_generated_config(tmp_dir: Path, config: dict[str, object]) -> Path:
         "const TEST_PHONE_TOKEN = " + php_string(test_phone_token) + ";\n"
         "const TEST_PHONE_TOKEN_EXPIRES_AT = " + php_string(test_phone_token_expires_at) + ";\n"
         "const WORKER_TOKEN = " + php_string(worker_token) + ";\n"
-        "const PHONE_WAIT_SECONDS = 240;\n",
+        "const PHONE_WAIT_SECONDS = 120;\n"
+        "const PROCESSING_STALE_SECONDS = 180;\n",
         encoding="utf-8",
     )
     return config_php

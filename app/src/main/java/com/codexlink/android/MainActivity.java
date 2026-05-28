@@ -1,6 +1,7 @@
 package com.codexlink.android;
 
 import android.Manifest;
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
@@ -10,7 +11,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
-import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Color;
@@ -34,6 +34,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewParent;
 import android.view.inputmethod.InputMethodManager;
+import android.window.OnBackInvokedDispatcher;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -60,6 +61,8 @@ import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
@@ -105,6 +108,8 @@ public class MainActivity extends Activity {
     private static final String STATE_THREAD_PROJECT_ERROR = "thread_project_error";
     private static final String STATE_THREAD_DRAFT_NEW = "thread_draft_new";
     private static final String STATE_THREAD_ACTIVE_TURN_ID = "thread_active_turn_id";
+    private static final String STATE_THREAD_ACTIVE_STARTED_AT = "thread_active_started_at";
+    private static final String STATE_THREAD_LAST_EVENT_AT = "thread_last_event_at";
     private static final String STATE_THREAD_STALE_REASON = "thread_stale_reason";
     private static final String STATE_THREAD_SEARCH = "thread_search";
     private static final String STATE_THREAD_MESSAGES = "thread_messages";
@@ -204,6 +209,8 @@ public class MainActivity extends Activity {
     private String currentThreadChatPath = "";
     private String currentThreadProjectError = "";
     private String currentThreadActiveTurnId = "";
+    private String currentThreadActiveStartedAt = "";
+    private String currentThreadLastEventAt = "";
     private String currentThreadStaleReason = "";
     private String currentThreadSearchQuery = "";
     private boolean currentThreadDraftNew = false;
@@ -214,6 +221,7 @@ public class MainActivity extends Activity {
     private String selectedImageMimeType = "";
     private String editingQueuedTurnId = "";
     private String lastRequestId = "";
+    private String lastRequestTurnId = "";
     private String lastRequestStage = "";
     private String lastRequestSummary = "";
     private String lastRequestDetail = "";
@@ -238,12 +246,15 @@ public class MainActivity extends Activity {
     private boolean currentThreadFullLoaded = false;
     private boolean applyingConnectionMode = false;
     private boolean connectionExpanded = false;
+    private boolean requestStatusExpanded = false;
+    private boolean threadStatusExpanded = false;
     private boolean activityForeground = false;
     private boolean queueReceiverRegistered = false;
     private boolean queueResumePromptShown = false;
     private boolean lastRequestIsError = false;
     private int loadedCatalogChatCount = 0;
     private JSONArray loadedCatalogChats = new JSONArray();
+    private JSONArray loadedCatalogProjects = new JSONArray();
     private JSONArray loadedThreadMessages = new JSONArray();
     private JSONArray loadedLiveEvents = new JSONArray();
     private String lastRenderedThreadSignature = "";
@@ -253,6 +264,7 @@ public class MainActivity extends Activity {
     private final ArrayList<String> renderedMessageTexts = new ArrayList<>();
     private final ArrayList<Integer> threadSearchMatches = new ArrayList<>();
     private final HashSet<String> loadedQueueItemIds = new HashSet<>();
+    private final HashSet<String> expandedQueueItemIds = new HashSet<>();
     private final Runnable threadPollRunnable = new Runnable() {
         @Override
         public void run() {
@@ -334,6 +346,16 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static class ProjectOption {
+        final String label;
+        final String path;
+
+        ProjectOption(String label, String path) {
+            this.label = label == null || label.trim().isEmpty() ? path : label.trim();
+            this.path = path == null ? "" : path.trim();
+        }
+    }
+
     private static class HttpResult {
         final int status;
         final String body;
@@ -363,6 +385,7 @@ public class MainActivity extends Activity {
             restoreInstanceState(savedInstanceState);
         }
         applyIncomingIntent(getIntent(), false);
+        registerBackHandler();
     }
 
     @Override
@@ -370,6 +393,11 @@ public class MainActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         applyIncomingIntent(intent, true);
+    }
+
+    @Override
+    public void onBackPressed() {
+        handleBackPressed();
     }
 
     @Override
@@ -420,6 +448,8 @@ public class MainActivity extends Activity {
         outState.putString(STATE_THREAD_PROJECT_ERROR, currentThreadProjectError);
         outState.putBoolean(STATE_THREAD_DRAFT_NEW, currentThreadDraftNew);
         outState.putString(STATE_THREAD_ACTIVE_TURN_ID, currentThreadActiveTurnId);
+        outState.putString(STATE_THREAD_ACTIVE_STARTED_AT, currentThreadActiveStartedAt);
+        outState.putString(STATE_THREAD_LAST_EVENT_AT, currentThreadLastEventAt);
         outState.putString(STATE_THREAD_STALE_REASON, currentThreadStaleReason);
         outState.putString(STATE_THREAD_SEARCH, currentThreadSearchQuery);
         outState.putString(STATE_THREAD_MESSAGES, loadedThreadMessages.toString());
@@ -476,6 +506,30 @@ public class MainActivity extends Activity {
         preferences.edit().putInt(PREF_LAST_INSTALL_NOTIFICATION_VERSION, BuildConfig.VERSION_CODE).apply();
     }
 
+    private boolean isViewingThread() {
+        return currentThreadDraftNew
+                || (currentThreadId != null && !currentThreadId.isEmpty())
+                || (threadControlsLayout != null && threadControlsLayout.getVisibility() == View.VISIBLE);
+    }
+
+    private void registerBackHandler() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                    this::handleBackPressed
+            );
+        }
+    }
+
+    private void handleBackPressed() {
+        if (isViewingThread()) {
+            showCachedChatList();
+            return;
+        }
+        finish();
+    }
+
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     private void registerQueueReceiver() {
         if (queueReceiverRegistered) {
             return;
@@ -526,7 +580,9 @@ public class MainActivity extends Activity {
 
         try {
             final int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-            getContentResolver().takePersistableUriPermission(uri, flags & Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            if ((flags & Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0) {
+                getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            }
         } catch (Exception ignored) {
             // Some pickers grant a temporary read URI only; that is enough for immediate send.
         }
@@ -798,14 +854,24 @@ public class MainActivity extends Activity {
         requestStatusPillView = text("", 12, COLOR_INK, Typeface.BOLD);
         requestStatusPillView.setSingleLine(false);
         requestStatusPillView.setMaxLines(3);
+        requestStatusPillView.setEllipsize(TextUtils.TruncateAt.END);
         requestStatusPillView.setPadding(dp(10), dp(6), dp(10), dp(6));
+        requestStatusPillView.setOnClickListener(view -> {
+            requestStatusExpanded = !requestStatusExpanded;
+            renderRequestStatusPill();
+        });
         requestStatusPillView.setVisibility(View.GONE);
         composer.addView(requestStatusPillView, matchWrap());
 
         threadTurnStatusView = text("", 12, COLOR_MUTED, Typeface.NORMAL);
         threadTurnStatusView.setSingleLine(false);
         threadTurnStatusView.setMaxLines(3);
+        threadTurnStatusView.setEllipsize(TextUtils.TruncateAt.END);
         threadTurnStatusView.setPadding(0, dp(4), 0, 0);
+        threadTurnStatusView.setOnClickListener(view -> {
+            threadStatusExpanded = !threadStatusExpanded;
+            applyThreadStatusExpansion();
+        });
         composer.addView(threadTurnStatusView, matchWrap());
 
         queuedTurnListLayout = new LinearLayout(this);
@@ -886,6 +952,14 @@ public class MainActivity extends Activity {
         loadCatalogButton.setTextSize(12);
         loadCatalogButton.setOnClickListener(view -> loadCatalog());
         hostRow.addView(loadCatalogButton, new LinearLayout.LayoutParams(0, dp(40), 1f));
+
+        hostRow.addView(spacer(dp(6)));
+
+        Button newChatButton = toolbarButton("New", Color.WHITE, COLOR_PRIMARY);
+        newChatButton.setTextSize(12);
+        newChatButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
+        newChatButton.setOnClickListener(view -> showNewThreadProjectDialog());
+        hostRow.addView(newChatButton, new LinearLayout.LayoutParams(0, dp(40), 1f));
 
         hostRow.addView(spacer(dp(6)));
 
@@ -1163,6 +1237,8 @@ public class MainActivity extends Activity {
         currentThreadProjectError = state.getString(STATE_THREAD_PROJECT_ERROR, "");
         currentThreadDraftNew = state.getBoolean(STATE_THREAD_DRAFT_NEW, false);
         currentThreadActiveTurnId = state.getString(STATE_THREAD_ACTIVE_TURN_ID, "");
+        currentThreadActiveStartedAt = state.getString(STATE_THREAD_ACTIVE_STARTED_AT, "");
+        currentThreadLastEventAt = state.getString(STATE_THREAD_LAST_EVENT_AT, "");
         currentThreadStaleReason = state.getString(STATE_THREAD_STALE_REASON, "");
         currentThreadSearchQuery = state.getString(STATE_THREAD_SEARCH, "");
         loadedRangeStart = state.getInt(STATE_RANGE_START, 0);
@@ -1253,6 +1329,8 @@ public class MainActivity extends Activity {
             currentThreadChatPath = state.optString(STATE_THREAD_CHAT_PATH, "");
             currentThreadProjectError = state.optString(STATE_THREAD_PROJECT_ERROR, "");
             currentThreadActiveTurnId = state.optString(STATE_THREAD_ACTIVE_TURN_ID, "");
+            currentThreadActiveStartedAt = state.optString(STATE_THREAD_ACTIVE_STARTED_AT, "");
+            currentThreadLastEventAt = state.optString(STATE_THREAD_LAST_EVENT_AT, "");
             currentThreadStaleReason = state.optString(STATE_THREAD_STALE_REASON, "");
             currentThreadSearchQuery = state.optString(STATE_THREAD_SEARCH, "");
             currentThreadStaleActive = state.optBoolean(STATE_THREAD_STALE_ACTIVE, false);
@@ -1316,6 +1394,8 @@ public class MainActivity extends Activity {
                     .put(STATE_THREAD_PROJECT_ERROR, currentThreadProjectError)
                     .put(STATE_THREAD_DRAFT_NEW, currentThreadDraftNew)
                     .put(STATE_THREAD_ACTIVE_TURN_ID, currentThreadActiveTurnId)
+                    .put(STATE_THREAD_ACTIVE_STARTED_AT, currentThreadActiveStartedAt)
+                    .put(STATE_THREAD_LAST_EVENT_AT, currentThreadLastEventAt)
                     .put(STATE_THREAD_STALE_REASON, currentThreadStaleReason)
                     .put(STATE_THREAD_SEARCH, currentThreadSearchQuery)
                     .put(STATE_THREAD_STALE_ACTIVE, currentThreadStaleActive)
@@ -1580,7 +1660,9 @@ public class MainActivity extends Activity {
 
     private void applyCatalog(JSONObject catalog) {
         JSONArray chats = catalog.optJSONArray("chats");
+        JSONArray projects = catalog.optJSONArray("projects");
         loadedCatalogChats = chats == null ? new JSONArray() : chats;
+        loadedCatalogProjects = projects == null ? new JSONArray() : projects;
         loadedCatalogChatCount = loadedCatalogChats.length();
         hasLoadedCatalog = true;
         renderFilteredChatRows(chatFilterInput == null ? "" : chatFilterInput.getText().toString());
@@ -1900,7 +1982,9 @@ public class MainActivity extends Activity {
 
     private void buildChatRows(JSONObject catalog) {
         JSONArray chats = catalog.optJSONArray("chats");
+        JSONArray projects = catalog.optJSONArray("projects");
         loadedCatalogChats = chats == null ? new JSONArray() : chats;
+        loadedCatalogProjects = projects == null ? new JSONArray() : projects;
         loadedCatalogChatCount = loadedCatalogChats.length();
         hasLoadedCatalog = true;
         renderFilteredChatRows(chatFilterInput == null ? "" : chatFilterInput.getText().toString());
@@ -2290,6 +2374,7 @@ public class MainActivity extends Activity {
 
     private void renderThreadPage(String endpoint, JSONObject response, boolean prepend, boolean full) {
         JSONObject thread = response.optJSONObject("thread");
+        JSONObject activity = response.optJSONObject("activity");
         JSONArray messages = response.optJSONArray("messages");
         JSONArray liveEvents = response.optJSONArray("liveEvents");
         int previousHeight = messageListLayout.getHeight();
@@ -2316,6 +2401,10 @@ public class MainActivity extends Activity {
             currentThreadStaleActive = thread.optBoolean("staleActive");
             currentThreadStaleReason = thread.optString("staleReason", "");
             currentThreadActiveTurnId = thread.optString("activeTurnId", "");
+            currentThreadActiveStartedAt = thread.optString("activeStartedAt", "");
+            currentThreadLastEventAt = activity == null
+                    ? thread.optString("updatedAt", "")
+                    : activity.optString("activeLastEventAt", activity.optString("lastEventAt", thread.optString("updatedAt", "")));
             ensureQueueLoadedForCurrentThread();
             loadThreadRequestStatus();
         }
@@ -2386,11 +2475,20 @@ public class MainActivity extends Activity {
         return jsonString(object, secondKey);
     }
 
+    private String firstNonEmpty(JSONObject object, String firstKey, String secondKey, String thirdKey) {
+        String first = firstNonEmpty(object, firstKey, secondKey);
+        if (!first.isEmpty()) {
+            return first;
+        }
+        return jsonString(object, thirdKey);
+    }
+
     private void updateThreadStatusFromPoll(JSONObject response) {
         JSONObject thread = response == null ? null : response.optJSONObject("thread");
         if (thread == null) {
             return;
         }
+        JSONObject activity = response.optJSONObject("activity");
         boolean wasProcessing = currentThreadActive || currentThreadStaleActive || isSendingThreadTurn;
         currentThreadId = thread.optString("id", currentThreadId == null ? "" : currentThreadId);
         currentThreadDraftNew = false;
@@ -2402,6 +2500,10 @@ public class MainActivity extends Activity {
         currentThreadStaleActive = thread.optBoolean("staleActive");
         currentThreadStaleReason = thread.optString("staleReason", "");
         currentThreadActiveTurnId = thread.optString("activeTurnId", "");
+        currentThreadActiveStartedAt = thread.optString("activeStartedAt", "");
+        currentThreadLastEventAt = activity == null
+                ? thread.optString("updatedAt", "")
+                : activity.optString("activeLastEventAt", activity.optString("lastEventAt", thread.optString("updatedAt", "")));
         boolean isProcessing = currentThreadActive || currentThreadStaleActive || isSendingThreadTurn;
         updateForegroundThreadState();
         maybeNotifyThreadCompleted(wasProcessing, isProcessing);
@@ -2918,14 +3020,7 @@ public class MainActivity extends Activity {
     }
 
     private String buildInstallStampText() {
-        long updatedAt = 0L;
-        try {
-            PackageInfo packageInfo = getPackageManager().getPackageInfo(getPackageName(), 0);
-            updatedAt = packageInfo.lastUpdateTime;
-        } catch (Exception ignored) {
-        }
-        long stamp = updatedAt > 0 ? updatedAt : System.currentTimeMillis();
-        return "Installed v" + BuildConfig.VERSION_NAME + " at " + timeFormat.format(new Date(stamp));
+        return "App v" + BuildConfig.VERSION_NAME + " built " + BuildConfig.CODEX_LINK_BUILD_STAMP;
     }
 
     private void renderThreadControls(boolean full) {
@@ -2984,14 +3079,6 @@ public class MainActivity extends Activity {
         row.addView(spacer(dp(3)));
 
         boolean hasProjectRoot = hasWritableProjectRoot();
-        Button newButton = toolbarButton("New", Color.WHITE, hasProjectRoot ? COLOR_PRIMARY : COLOR_MUTED);
-        newButton.setEnabled(hasProjectRoot);
-        newButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
-        newButton.setOnClickListener(view -> startNewThreadFromCurrentProject());
-        row.addView(newButton, new LinearLayout.LayoutParams(0, dp(32), 0.5f));
-
-        row.addView(spacer(dp(3)));
-
         Button filesButton = toolbarButton("Files", Color.WHITE, hasProjectRoot ? COLOR_PRIMARY : COLOR_MUTED);
         filesButton.setEnabled(hasProjectRoot);
         filesButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
@@ -3042,14 +3129,6 @@ public class MainActivity extends Activity {
         LinearLayout row = compactToolbarRow();
 
         boolean hasProjectRoot = hasWritableProjectRoot();
-        Button newButton = toolbarButton("New", Color.WHITE, hasProjectRoot ? COLOR_PRIMARY : COLOR_MUTED);
-        newButton.setEnabled(hasProjectRoot);
-        newButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
-        newButton.setOnClickListener(view -> startNewThreadFromCurrentProject());
-        row.addView(newButton, weightedToolbarButton());
-
-        row.addView(spacer(dp(3)));
-
         boolean canStop = currentThreadActive && !currentThreadActiveTurnId.isEmpty();
         Button stopButton = toolbarButton("Stop", Color.WHITE, canStop ? COLOR_ACCENT : COLOR_MUTED);
         stopButton.setEnabled(canStop);
@@ -3157,6 +3236,72 @@ public class MainActivity extends Activity {
         return row;
     }
 
+    private void showNewThreadProjectDialog() {
+        String endpoint = normalizedEndpoint();
+        if (endpoint.isEmpty()) {
+            setCatalogStatus("Enter the desktop endpoint URL first.", true);
+            return;
+        }
+        if (!hasLoadedCatalog) {
+            loadCachedCatalog();
+        }
+        ArrayList<ProjectOption> options = newThreadProjectOptions();
+        if (options.isEmpty()) {
+            setCatalogStatus("No writable projects found yet. Tap Refresh, then try New.", true);
+            return;
+        }
+        ArrayList<String> labels = new ArrayList<>();
+        for (ProjectOption option : options) {
+            labels.add(option.label + "\n" + option.path);
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Start new chat")
+                .setItems(labels.toArray(new String[0]), (dialog, which) -> startNewThreadDraft(options.get(which).path, options.get(which).label))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private ArrayList<ProjectOption> newThreadProjectOptions() {
+        ArrayList<ProjectOption> options = new ArrayList<>();
+        HashSet<String> seen = new HashSet<>();
+
+        for (int index = 0; index < loadedCatalogProjects.length(); index++) {
+            JSONObject project = loadedCatalogProjects.optJSONObject(index);
+            if (project == null) {
+                continue;
+            }
+            addProjectOption(options, seen, jsonString(project, "label"), firstNonEmpty(project, "path", "id"));
+        }
+
+        for (int index = 0; index < loadedCatalogChats.length(); index++) {
+            JSONObject chat = loadedCatalogChats.optJSONObject(index);
+            if (chat == null || !jsonString(chat, "projectRootError").isEmpty()) {
+                continue;
+            }
+            String path = firstNonEmpty(chat, "projectPath", "catalogProjectPath", "cwd");
+            addProjectOption(options, seen, firstNonEmpty(chat, "projectLabel", "displayTitle", "title"), path);
+        }
+
+        if (!hasWritableProjectRoot()) {
+            return options;
+        }
+        addProjectOption(options, seen, currentThreadTitle == null ? "Current project" : currentThreadTitle, currentThreadCwd);
+        return options;
+    }
+
+    private void addProjectOption(ArrayList<ProjectOption> options, HashSet<String> seen, String label, String path) {
+        if (path == null || path.trim().isEmpty()) {
+            return;
+        }
+        String cleanPath = path.trim();
+        String key = cleanPath.toLowerCase(Locale.US);
+        if (seen.contains(key)) {
+            return;
+        }
+        seen.add(key);
+        options.add(new ProjectOption(label, cleanPath));
+    }
+
     private void startNewThreadFromCurrentProject() {
         String endpoint = normalizedEndpoint();
         if (endpoint.isEmpty()) {
@@ -3170,10 +3315,25 @@ public class MainActivity extends Activity {
             setThreadTurnStatus("Cannot start a new chat from this chat yet. " + detail, true);
             return;
         }
+        startNewThreadDraft(currentThreadCwd, currentThreadTitle == null ? "Current project" : currentThreadTitle);
+    }
 
+    private void startNewThreadDraft(String projectRoot, String projectLabel) {
+        String endpoint = normalizedEndpoint();
+        if (endpoint.isEmpty()) {
+            setCatalogStatus("Enter the desktop endpoint URL first.", true);
+            return;
+        }
+        if (projectRoot == null || projectRoot.trim().isEmpty()) {
+            setCatalogStatus("Choose a writable project first.", true);
+            return;
+        }
         currentThreadDraftNew = true;
         currentThreadId = "";
         currentThreadTitle = "New chat";
+        currentThreadCwd = projectRoot.trim();
+        currentThreadChatPath = "";
+        currentThreadProjectError = "";
         currentThreadActive = false;
         currentThreadStaleActive = false;
         currentThreadActiveTurnId = "";
@@ -3193,7 +3353,7 @@ public class MainActivity extends Activity {
         renderThreadMessages(endpoint);
         updateThreadComposerState();
         saveActiveThreadState();
-        setThreadTurnStatus("New chat draft. Type the first message to create it.", false);
+        setThreadTurnStatus("New chat draft for " + (projectLabel == null || projectLabel.trim().isEmpty() ? currentThreadCwd : projectLabel.trim()) + ". Type the first message to create it.", false);
     }
 
     private void confirmStopCurrentThread() {
@@ -3805,6 +3965,8 @@ public class MainActivity extends Activity {
         currentThreadProjectError = "";
         currentThreadDraftNew = false;
         currentThreadActiveTurnId = "";
+        currentThreadActiveStartedAt = "";
+        currentThreadLastEventAt = "";
         currentThreadStaleReason = "";
         loadedRangeStart = 0;
         loadedRangeEnd = 0;
@@ -4424,12 +4586,17 @@ public class MainActivity extends Activity {
         boolean currentHasQueue = hasQueueForCurrentThread(queues);
         if (isQueuePaused()) {
             String detail = queuePausedDetail();
-            if (currentHasQueue) {
-                setThreadTurnStatus(detail.isEmpty() ? "Queue paused. Tap Resume queue to continue." : detail, false);
+            if (isRecoverablePausedQueue(detail)) {
+                setQueuePaused(false, "");
+                detail = "";
+            } else {
+                if (currentHasQueue) {
+                    setThreadTurnStatus(detail.isEmpty() ? "Queue paused. Tap Resume queue to continue." : detail, false);
+                }
+                maybePromptResumeQueue();
+                renderQueuedTurns();
+                return;
             }
-            maybePromptResumeQueue();
-            renderQueuedTurns();
-            return;
         }
         startQueueWorker(currentHasQueue ? "Queue worker running." : "");
     }
@@ -4466,6 +4633,13 @@ public class MainActivity extends Activity {
             return "";
         }
         return preferences.getString(PREF_QUEUE_STALLED_DETAIL, "");
+    }
+
+    private boolean isRecoverablePausedQueue(String detail) {
+        String lower = detail == null ? "" : detail.toLowerCase(Locale.US);
+        return lower.contains("stale processing state")
+                || lower.contains("queue preserved after qa")
+                || lower.contains("queue paused so it does not resend");
     }
 
     private void setQueuePaused(boolean paused, String detail) {
@@ -4527,6 +4701,7 @@ public class MainActivity extends Activity {
         String requestStage = intent == null ? "" : intent.getStringExtra(CodexQueueService.EXTRA_REQUEST_STAGE);
         String requestSummary = intent == null ? "" : intent.getStringExtra(CodexQueueService.EXTRA_REQUEST_SUMMARY);
         String requestId = intent == null ? "" : intent.getStringExtra(CodexQueueService.EXTRA_REQUEST_ID);
+        String requestTurnId = intent == null ? "" : intent.getStringExtra(CodexQueueService.EXTRA_REQUEST_TURN_ID);
         if (currentThreadId != null && !currentThreadId.isEmpty()) {
             reloadCurrentThreadQueueFromDisk();
             boolean appliesToCurrentThread = threadId != null && !threadId.isEmpty() && currentThreadId.equals(threadId);
@@ -4537,7 +4712,7 @@ public class MainActivity extends Activity {
                 setThreadTurnStatus(processingStatusText(), false);
             }
             if (requestStage != null && !requestStage.isEmpty() && appliesToCurrentThread) {
-                updateRequestStatusPill(requestStage, requestSummary, status, isError, requestId, true);
+                updateRequestStatusPill(requestStage, requestSummary, status, isError, requestId, true, requestTurnId);
             }
             if (appliesToCurrentThread
                     && ("Stalled".equalsIgnoreCase(requestStage) || (isError && status != null && status.toLowerCase(Locale.US).contains("queue stalled")))) {
@@ -4564,7 +4739,9 @@ public class MainActivity extends Activity {
         return "Sending".equalsIgnoreCase(requestStage)
                 || "Processing".equalsIgnoreCase(requestStage)
                 || "Completed".equalsIgnoreCase(requestStage)
-                || "Error".equalsIgnoreCase(requestStage);
+                || "Error".equalsIgnoreCase(requestStage)
+                || "Stalled".equalsIgnoreCase(requestStage)
+                || "Stale".equalsIgnoreCase(requestStage);
     }
 
     private void forceSendQueuedTurn(QueuedTurn turn) {
@@ -4620,6 +4797,7 @@ public class MainActivity extends Activity {
                 Log.i(TAG, "Sending queued thread turn to " + turnsEndpoint);
                 String responseBody = postThreadPayload(turnsEndpoint, token, turn.payload);
                 boolean stillProcessing = isProcessingTurnResponse(responseBody);
+                String acceptedTurnId = turnIdFromTurnResponse(responseBody);
                 String acceptedStage = stillProcessing ? "Processing" : "Completed";
                 String acceptedDetail = stillProcessing
                         ? "Received by Windows once and removed from the phone queue. Waiting for Windows to finish."
@@ -4629,17 +4807,19 @@ public class MainActivity extends Activity {
                     if (samePayload(sendingThreadPayload, turn.payload)) {
                         sendingThreadPayload = null;
                     }
-                    removeQueuedTurnFromStorage(threadId, turn, acceptedStage, acceptedDetail);
+                    removeQueuedTurnFromStorage(threadId, turn, acceptedStage, acceptedDetail, acceptedTurnId);
                     renderQueuedTurns();
                     updateThreadComposerState();
                     if (stillProcessing) {
                         currentThreadActive = true;
+                        currentThreadActiveTurnId = acceptedTurnId;
                         rememberThreadRequestStatus(
                                 "Processing",
                                 turn.payload,
                                 acceptedDetail,
                                 false,
-                                turn.id);
+                                turn.id,
+                                acceptedTurnId);
                         setThreadTurnStatus("Request sent. Codex is still processing.", false);
                         scheduleThreadPoll();
                     } else {
@@ -4648,7 +4828,8 @@ public class MainActivity extends Activity {
                                 turn.payload,
                                 acceptedDetail,
                                 false,
-                                turn.id);
+                                turn.id,
+                                acceptedTurnId);
                         setThreadTurnStatus("Queued message sent.", false);
                     }
                     if (threadId.equals(currentThreadId)) {
@@ -4702,6 +4883,23 @@ public class MainActivity extends Activity {
             return object.optBoolean("accepted", false) && !object.optBoolean("completed", true);
         } catch (JSONException ignored) {
             return false;
+        }
+    }
+
+    private String turnIdFromTurnResponse(String body) {
+        if (body == null || body.trim().isEmpty()) {
+            return "";
+        }
+        try {
+            JSONObject object = new JSONObject(body);
+            String id = object.optString("turnId", "");
+            if (!id.isEmpty()) {
+                return id;
+            }
+            JSONObject turn = object.optJSONObject("turn");
+            return turn == null ? "" : turn.optString("id", "");
+        } catch (JSONException ignored) {
+            return "";
         }
     }
 
@@ -4774,17 +4972,19 @@ public class MainActivity extends Activity {
         }
         if (currentThreadActive) {
             int count = queuedThreadTurns.size();
+            String pulse = processingPulseText();
             if (count > 0) {
-                return "Codex is processing. " + count + " queued.";
+                return "Codex is processing" + pulse + ". " + count + " queued.";
             }
-            return "Codex is processing.";
+            return "Codex is processing" + pulse + ".";
         }
         if (currentThreadStaleActive) {
             int count = queuedThreadTurns.size();
+            String pulse = processingPulseText();
             if (count > 0) {
-                return "Recovered stale processing state. " + count + " queued message" + (count == 1 ? "" : "s") + " ready.";
+                return "No recent Codex activity" + pulse + ". " + count + " queued message" + (count == 1 ? "" : "s") + " ready.";
             }
-            return "Recovered stale processing state.";
+            return "No recent Codex activity" + pulse + ".";
         }
         int count = queuedThreadTurns.size();
         if (!hasWritableProjectRoot() && currentThreadProjectError != null && !currentThreadProjectError.trim().isEmpty()) {
@@ -4794,6 +4994,22 @@ public class MainActivity extends Activity {
             return "Idle. " + count + " queued message" + (count == 1 ? "" : "s") + " ready.";
         }
         return "Idle.";
+    }
+
+    private String processingPulseText() {
+        ArrayList<String> parts = new ArrayList<>();
+        String started = localTimeFromIso(currentThreadActiveStartedAt);
+        String lastOutput = localTimeFromIso(currentThreadLastEventAt);
+        if (!started.isEmpty()) {
+            parts.add("since " + started);
+        }
+        if (!lastOutput.isEmpty()) {
+            parts.add("last output " + lastOutput);
+        }
+        if (parts.isEmpty()) {
+            return "";
+        }
+        return " (" + TextUtils.join(", ", parts) + ")";
     }
 
     private void renderQueuedTurns() {
@@ -5244,6 +5460,7 @@ public class MainActivity extends Activity {
         lastRequestSummary = requestSummary(payload);
         lastRequestDetail = item.optString("detail", "");
         lastRequestId = id.isEmpty() ? payloadId : id;
+        lastRequestTurnId = item.optString("turnId", "");
         lastRequestIsError = false;
         lastRequestAt = item.optLong("completedAt", item.optLong("sentAt", System.currentTimeMillis()));
         renderRequestStatusPill();
@@ -5342,11 +5559,11 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void removeQueuedTurnFromStorage(String threadId, QueuedTurn turn, String stage, String detail) {
+    private void removeQueuedTurnFromStorage(String threadId, QueuedTurn turn, String stage, String detail, String turnId) {
         if (threadId == null || threadId.isEmpty() || turn == null) {
             return;
         }
-        archiveSentQueuedTurn(threadId, turn, stage, detail);
+        archiveSentQueuedTurn(threadId, turn, stage, detail, turnId);
         if (threadId.equals(queueThreadId)) {
             queuedThreadTurns.remove(turn);
             if (turn.id.equals(editingQueuedTurnId)) {
@@ -5586,7 +5803,7 @@ public class MainActivity extends Activity {
         return allSentQueueHistory(0).size();
     }
 
-    private void archiveSentQueuedTurn(String threadId, QueuedTurn turn, String stage, String detail) {
+    private void archiveSentQueuedTurn(String threadId, QueuedTurn turn, String stage, String detail, String turnId) {
         if (threadId == null || threadId.isEmpty() || turn == null) {
             return;
         }
@@ -5601,6 +5818,7 @@ public class MainActivity extends Activity {
                         .put("sentAt", System.currentTimeMillis())
                         .put("stage", stage == null || stage.isEmpty() ? "Sent" : stage)
                         .put("detail", detail == null ? "" : detail)
+                        .put("turnId", turnId == null ? "" : turnId)
                         .put("payload", turn.payload));
                 JSONArray trimmed = new JSONArray();
                 int start = Math.max(0, array.length() - 50);
@@ -6008,13 +6226,18 @@ public class MainActivity extends Activity {
     }
 
     private void rememberThreadRequestStatus(String stage, JSONObject payload, String detail, boolean isError, String requestId) {
+        rememberThreadRequestStatus(stage, payload, detail, isError, requestId, "");
+    }
+
+    private void rememberThreadRequestStatus(String stage, JSONObject payload, String detail, boolean isError, String requestId, String turnId) {
         updateRequestStatusPill(
                 stage,
                 payload == null ? "" : requestSummary(payload),
                 detail,
                 isError,
                 requestId,
-                true);
+                true,
+                turnId);
     }
 
     private void updateRequestStatusPill(
@@ -6025,10 +6248,23 @@ public class MainActivity extends Activity {
             String requestId,
             boolean persist
     ) {
+        updateRequestStatusPill(stage, summary, detail, isError, requestId, persist, "");
+    }
+
+    private void updateRequestStatusPill(
+            String stage,
+            String summary,
+            String detail,
+            boolean isError,
+            String requestId,
+            boolean persist,
+            String turnId
+    ) {
         lastRequestStage = stage == null ? "" : stage.trim();
         lastRequestSummary = summary == null ? "" : summary.trim();
         lastRequestDetail = detail == null ? "" : detail.trim();
         lastRequestId = requestId == null ? "" : requestId.trim();
+        lastRequestTurnId = turnId == null ? "" : turnId.trim();
         lastRequestIsError = isError;
         lastRequestAt = System.currentTimeMillis();
         renderRequestStatusPill();
@@ -6072,6 +6308,7 @@ public class MainActivity extends Activity {
         requestStatusPillView.setText(builder.toString());
         requestStatusPillView.setTextColor(textColor);
         requestStatusPillView.setBackground(outlineDrawable(backgroundColor, textColor, dp(16)));
+        requestStatusPillView.setMaxLines(requestStatusExpanded ? Integer.MAX_VALUE : 3);
         requestStatusPillView.setVisibility(View.VISIBLE);
     }
 
@@ -6086,6 +6323,9 @@ public class MainActivity extends Activity {
         if ("Waiting".equalsIgnoreCase(lastRequestStage)) {
             return "Queue status";
         }
+        if ("Stale".equalsIgnoreCase(lastRequestStage) || "Stalled".equalsIgnoreCase(lastRequestStage)) {
+            return "Needs attention";
+        }
         if ("Completed".equalsIgnoreCase(lastRequestStage)) {
             return "Last sent";
         }
@@ -6093,8 +6333,11 @@ public class MainActivity extends Activity {
     }
 
     private int requestStatusTextColor(String stage, boolean isError) {
-        if (isError || "Error".equalsIgnoreCase(stage)) {
+        if (isError || "Error".equalsIgnoreCase(stage) || "Stalled".equalsIgnoreCase(stage)) {
             return COLOR_ACCENT;
+        }
+        if ("Stale".equalsIgnoreCase(stage)) {
+            return Color.rgb(126, 87, 19);
         }
         if ("Completed".equalsIgnoreCase(stage)) {
             return COLOR_PRIMARY;
@@ -6106,8 +6349,11 @@ public class MainActivity extends Activity {
     }
 
     private int requestStatusBackgroundColor(String stage, boolean isError) {
-        if (isError || "Error".equalsIgnoreCase(stage)) {
+        if (isError || "Error".equalsIgnoreCase(stage) || "Stalled".equalsIgnoreCase(stage)) {
             return Color.rgb(255, 244, 241);
+        }
+        if ("Stale".equalsIgnoreCase(stage)) {
+            return Color.rgb(255, 249, 230);
         }
         if ("Completed".equalsIgnoreCase(stage)) {
             return Color.rgb(237, 249, 245);
@@ -6156,6 +6402,28 @@ public class MainActivity extends Activity {
             }
             return;
         }
+        if (activeTurnMovedPastLastPhoneRequest()) {
+            updateRequestStatusPill(
+                    "Completed",
+                    lastRequestSummary,
+                    "Windows moved on to another turn. This phone request is no longer the active desktop turn.",
+                    false,
+                    lastRequestId,
+                    true,
+                    lastRequestTurnId);
+            return;
+        }
+        if (currentThreadStaleActive && ("Processing".equalsIgnoreCase(lastRequestStage) || "Waiting".equalsIgnoreCase(lastRequestStage))) {
+            updateRequestStatusPill(
+                    "Stale",
+                    lastRequestSummary,
+                    "No recent desktop output. The queued item is preserved; use Try now only after confirming the desktop chat is idle.",
+                    false,
+                    lastRequestId,
+                    true,
+                    lastRequestTurnId);
+            return;
+        }
         if (currentThreadActive) {
             updateRequestStatusPill(
                     "Processing",
@@ -6175,6 +6443,28 @@ public class MainActivity extends Activity {
                     lastRequestId,
                     true);
         }
+    }
+
+    private boolean activeTurnMovedPastLastPhoneRequest() {
+        if (!currentThreadActive || lastRequestId == null || lastRequestId.isEmpty()) {
+            return false;
+        }
+        if (!"Processing".equalsIgnoreCase(lastRequestStage) && !"Waiting".equalsIgnoreCase(lastRequestStage)) {
+            return false;
+        }
+        if (lastRequestTurnId != null
+                && !lastRequestTurnId.isEmpty()
+                && currentThreadActiveTurnId != null
+                && !currentThreadActiveTurnId.isEmpty()
+                && !lastRequestTurnId.equals(currentThreadActiveTurnId)) {
+            return true;
+        }
+        long activeStartedAt = parseIsoMillis(currentThreadActiveStartedAt);
+        return lastRequestTurnId != null
+                && lastRequestTurnId.isEmpty()
+                && activeStartedAt > 0
+                && lastRequestAt > 0
+                && activeStartedAt - lastRequestAt > 120000;
     }
 
     private boolean queuedContainsRequestId(String requestId) {
@@ -6199,6 +6489,7 @@ public class MainActivity extends Activity {
                     .put("summary", lastRequestSummary)
                     .put("detail", lastRequestDetail)
                     .put("requestId", lastRequestId)
+                    .put("turnId", lastRequestTurnId)
                     .put("isError", lastRequestIsError)
                     .put("at", lastRequestAt);
             preferences.edit().putString(requestStatusPrefKey(currentThreadId), object.toString()).apply();
@@ -6222,6 +6513,7 @@ public class MainActivity extends Activity {
             lastRequestSummary = object.optString("summary", "");
             lastRequestDetail = object.optString("detail", "");
             lastRequestId = object.optString("requestId", "");
+            lastRequestTurnId = object.optString("turnId", "");
             lastRequestIsError = object.optBoolean("isError", false);
             lastRequestAt = object.optLong("at", 0L);
             renderRequestStatusPill();
@@ -6235,6 +6527,7 @@ public class MainActivity extends Activity {
         lastRequestSummary = "";
         lastRequestDetail = "";
         lastRequestId = "";
+        lastRequestTurnId = "";
         lastRequestAt = 0L;
         lastRequestIsError = false;
         if (requestStatusPillView != null) {
@@ -6249,6 +6542,14 @@ public class MainActivity extends Activity {
     private void setThreadTurnStatus(String message, boolean isError) {
         threadTurnStatusView.setText(message);
         threadTurnStatusView.setTextColor(isError ? COLOR_ACCENT : COLOR_MUTED);
+        applyThreadStatusExpansion();
+    }
+
+    private void applyThreadStatusExpansion() {
+        if (threadTurnStatusView == null) {
+            return;
+        }
+        threadTurnStatusView.setMaxLines(threadStatusExpanded ? Integer.MAX_VALUE : 3);
     }
 
     private void showThreadResponseOverlay(String message) {
@@ -6271,6 +6572,22 @@ public class MainActivity extends Activity {
     private void hideThreadResponseOverlay() {
         if (threadResponseOverlay != null) {
             threadResponseOverlay.setVisibility(View.GONE);
+        }
+    }
+
+    private String localTimeFromIso(String value) {
+        long millis = parseIsoMillis(value);
+        return millis > 0 ? timeFormat.format(new Date(millis)) : "";
+    }
+
+    private long parseIsoMillis(String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return 0L;
+        }
+        try {
+            return Instant.parse(value.trim()).toEpochMilli();
+        } catch (DateTimeParseException error) {
+            return 0L;
         }
     }
 

@@ -1,7 +1,7 @@
 import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 
@@ -183,6 +183,19 @@ async function main(): Promise<void> {
     )) as JsonObject;
     const thread = start.thread as JsonObject | undefined;
     threadId = String(thread?.id ?? start.threadId ?? start.id ?? threadId);
+    const threadName = threadNameForPrompt(prompt, cwd);
+    if (threadId && threadName) {
+      try {
+        await rpc.request("thread/name/set", { threadId, name: threadName }, 30000);
+      } catch (error) {
+        append(
+          serverLogPath,
+          `[${new Date().toISOString()}] thread/name/set failed for ${threadId}: ${
+            error instanceof Error ? error.message : String(error)
+          }\n`,
+        );
+      }
+    }
 
     if (prompt) {
       const turn = await rpc.request(
@@ -248,6 +261,15 @@ function sandboxPolicyForCwd(cwd: string): JsonObject {
     excludeTmpdirEnvVar: false,
     excludeSlashTmp: false,
   };
+}
+
+function threadNameForPrompt(prompt: string, cwd: string): string {
+  const firstPromptLine = prompt
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  const raw = firstPromptLine || basename(cwd) || "Phone-created chat";
+  return raw.length > 90 ? raw.slice(0, 87).trimEnd() + "..." : raw;
 }
 
 async function appServerUrlForTurn(configUrl: string): Promise<string> {

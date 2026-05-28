@@ -40,6 +40,72 @@ function relay_cleanup(string $dir, int $maxAgeSeconds): void {
     }
 }
 
+function relay_processing_stale_seconds(): int {
+    return defined('PROCESSING_STALE_SECONDS') ? (int)PROCESSING_STALE_SECONDS : 180;
+}
+
+function relay_processing_jobs(string $dir): array {
+    $files = glob($dir . '/*.json') ?: [];
+    sort($files, SORT_STRING);
+    $jobs = [];
+    $now = time();
+    foreach ($files as $file) {
+        $raw = file_get_contents($file);
+        $job = json_decode($raw === false ? '' : $raw, true);
+        if (!is_array($job)) {
+            continue;
+        }
+        $createdAt = (string)($job['createdAt'] ?? '');
+        $createdAtSeconds = $createdAt === '' ? false : strtotime($createdAt);
+        if ($createdAtSeconds === false) {
+            $createdAtSeconds = @filemtime($file);
+        }
+        $age = $createdAtSeconds === false ? null : max(0, $now - $createdAtSeconds);
+        $jobs[] = [
+            'id' => (string)($job['id'] ?? basename($file, '.json')),
+            'createdAt' => $createdAt,
+            'ageSeconds' => $age,
+            'method' => (string)($job['method'] ?? ''),
+            'route' => (string)($job['route'] ?? '')
+        ];
+    }
+    return $jobs;
+}
+
+function relay_fail_stale_processing(string $processingDir, string $resultsDir): void {
+    $files = glob($processingDir . '/*.json') ?: [];
+    $cutoff = time() - relay_processing_stale_seconds();
+    foreach ($files as $file) {
+        $mtime = @filemtime($file);
+        if ($mtime === false || $mtime >= $cutoff) {
+            continue;
+        }
+        $raw = file_get_contents($file);
+        $job = json_decode($raw === false ? '' : $raw, true);
+        if (!is_array($job)) {
+            @unlink($file);
+            continue;
+        }
+        $id = preg_replace('/[^A-Za-z0-9._-]/', '', (string)($job['id'] ?? basename($file, '.json')));
+        if ($id === '') {
+            @unlink($file);
+            continue;
+        }
+        $body = json_encode([
+            'ok' => false,
+            'error' => 'Windows tunnel stalled before completing this request. The queued message is still on the phone; use Try now after the tunnel is healthy.'
+        ], JSON_UNESCAPED_SLASHES);
+        $result = [
+            'id' => $id,
+            'status' => 504,
+            'contentType' => 'application/json; charset=utf-8',
+            'bodyBase64' => base64_encode($body === false ? '{}' : $body)
+        ];
+        file_put_contents($resultsDir . '/' . $id . '.json', json_encode($result, JSON_UNESCAPED_SLASHES), LOCK_EX);
+        @unlink($file);
+    }
+}
+
 if (WORKER_TOKEN !== '' && !hash_equals(WORKER_TOKEN, relay_token())) {
     relay_json(['ok' => false, 'error' => 'unauthorized'], 401);
 }
@@ -49,7 +115,7 @@ $jobsDir = relay_data_dir('jobs');
 $processingDir = relay_data_dir('processing');
 $resultsDir = relay_data_dir('results');
 relay_cleanup($resultsDir, 3600);
-relay_cleanup($processingDir, 3600);
+relay_fail_stale_processing($processingDir, $resultsDir);
 
 if ($action === 'status') {
     relay_json([
@@ -57,6 +123,7 @@ if ($action === 'status') {
         'jobs' => count(glob($jobsDir . '/*.json') ?: []),
         'processing' => count(glob($processingDir . '/*.json') ?: []),
         'results' => count(glob($resultsDir . '/*.json') ?: []),
+        'processingJobs' => relay_processing_jobs($processingDir),
         'generatedAt' => gmdate('c')
     ]);
 }
@@ -101,4 +168,3 @@ if ($action === 'complete') {
 }
 
 relay_json(['ok' => false, 'error' => 'unknown worker action'], 404);
-

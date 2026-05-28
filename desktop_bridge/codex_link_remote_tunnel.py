@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import socket
 import sys
 import time
 from pathlib import Path
@@ -12,6 +13,10 @@ from urllib.request import Request, urlopen
 
 
 CONFIG_PATH = Path(__file__).with_name("remote_tunnel_config.json")
+
+
+def log(message: str, *, error: bool = False) -> None:
+    print(message, file=sys.stderr if error else sys.stdout, flush=True)
 
 
 def load_config() -> dict[str, Any]:
@@ -71,6 +76,20 @@ def complete_job(config: dict[str, Any], result: dict[str, Any]) -> None:
         raise RuntimeError(f"relay complete returned HTTP {status}: {response_body[:500].decode('utf-8', 'replace')}")
 
 
+def complete_job_with_retry(config: dict[str, Any], result: dict[str, Any]) -> None:
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            complete_job(config, result)
+            return
+        except Exception as error:
+            last_error = error
+            log(f"Relay complete attempt {attempt} failed for {result.get('id')}: {error}", error=True)
+            time.sleep(attempt)
+    if last_error is not None:
+        raise last_error
+
+
 def local_url_for(config: dict[str, Any], job: dict[str, Any]) -> str:
     base = str(config.get("localBaseUrl") or "http://127.0.0.1:18765").rstrip("/")
     route = str(job.get("route") or "/")
@@ -92,9 +111,23 @@ def forwarded_headers(headers: dict[str, str]) -> dict[str, str]:
     return allowed
 
 
+def route_timeout_seconds(config: dict[str, Any], job: dict[str, Any]) -> float:
+    method = str(job.get("method") or "GET").upper()
+    route = str(job.get("route") or "/").lower()
+    if method == "GET":
+        if route.endswith("/status") or route in {"/host/status", "/server-health", "/health", "/threads"}:
+            return float(config.get("statusTimeoutSeconds") or 20)
+        if "/files/" in route or route.endswith("/download") or route.endswith("/apk"):
+            return float(config.get("downloadTimeoutSeconds") or 90)
+        return float(config.get("getTimeoutSeconds") or 30)
+    if method == "POST" and (route == "/threads" or route.endswith("/turns")):
+        return float(config.get("turnTimeoutSeconds") or 120)
+    return float(config.get("defaultLocalTimeoutSeconds") or config.get("localTimeoutSeconds") or 60)
+
+
 def handle_job(config: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     job_id = str(job.get("id") or "")
-    local_timeout = float(config.get("localTimeoutSeconds") or 310)
+    local_timeout = route_timeout_seconds(config, job)
     body = base64.b64decode(str(job.get("bodyBase64") or ""))
     headers = {
         "Accept": str(job.get("accept") or "application/json"),
@@ -119,7 +152,7 @@ def handle_job(config: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
             "headers": forwarded_headers(response_headers),
             "bodyBase64": base64.b64encode(response_body).decode("ascii"),
         }
-    except (OSError, URLError, TimeoutError) as error:
+    except (OSError, URLError, TimeoutError, socket.timeout) as error:
         error_body = json.dumps({"ok": False, "error": f"Windows tunnel failed: {error}"}).encode("utf-8")
         return {
             "id": job_id,
@@ -132,23 +165,27 @@ def handle_job(config: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
 def main() -> int:
     config = load_config()
     poll_seconds = float(config.get("pollSeconds") or 1.0)
-    print("Codex Link remote tunnel started.")
-    print(f"Relay worker: {config['relayWorkerUrl']}")
-    print(f"Local bridge: {config.get('localBaseUrl', 'http://127.0.0.1:18765')}")
+    log("Codex Link remote tunnel started.")
+    log(f"Relay worker: {config['relayWorkerUrl']}")
+    log(f"Local bridge: {config.get('localBaseUrl', 'http://127.0.0.1:18765')}")
     while True:
         try:
             job = next_job(config)
             if job is None:
                 time.sleep(poll_seconds)
                 continue
-            print(f"Forwarding relay job {job.get('id')} {job.get('method')} {job.get('route')}")
+            started = time.monotonic()
+            timeout = route_timeout_seconds(config, job)
+            log(f"Forwarding relay job {job.get('id')} {job.get('method')} {job.get('route')} timeout={timeout:.0f}s")
             result = handle_job(config, job)
-            complete_job(config, result)
+            complete_job_with_retry(config, result)
+            elapsed = time.monotonic() - started
+            log(f"Completed relay job {job.get('id')} HTTP {result.get('status')} in {elapsed:.1f}s")
         except KeyboardInterrupt:
-            print("Stopping remote tunnel.")
+            log("Stopping remote tunnel.")
             return 0
         except Exception as error:
-            print(f"Remote tunnel error: {error}", file=sys.stderr)
+            log(f"Remote tunnel error: {error}", error=True)
             time.sleep(max(2.0, poll_seconds))
 
 
