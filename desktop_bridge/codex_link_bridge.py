@@ -2042,6 +2042,39 @@ class CodexLinkHandler(BaseHTTPRequestHandler):
                 self.write_file(media_path)
                 return
 
+            status_marker = "/status"
+            if thread_tail.endswith(status_marker):
+                thread_id = thread_tail[: -len(status_marker)]
+                row = load_thread_row(self.codex_home, thread_id)
+                if row is None:
+                    self.write_json({"error": "thread not found"}, status=404)
+                    return
+                rollout_path = Path(clean_windows_path(row_value(row, "rollout_path", "")))
+                activity = thread_activity_for_path(rollout_path, tail_only=False)
+                updated_ms = row_value(row, "updated_at_ms") or (
+                    row_value(row, "updated_at") * 1000 if row_value(row, "updated_at") else None
+                )
+                self.write_json(
+                    {
+                        "source": "codex-rollout",
+                        "generatedAt": datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "thread": {
+                            "id": row_value(row, "id", thread_id),
+                            "title": row_value(row, "title", "Untitled chat") or "Untitled chat",
+                            "updatedAt": iso_from_ms(updated_ms),
+                            "updatedAtMs": updated_ms,
+                            "status": activity["status"],
+                            "active": activity["active"],
+                            "staleActive": activity.get("staleActive", False),
+                            "staleReason": activity.get("staleReason", ""),
+                            "activeTurnId": activity.get("activeTurnId", ""),
+                            "activeStartedAt": activity.get("activeStartedAt", ""),
+                        },
+                        "activity": activity,
+                    }
+                )
+                return
+
             thread_id = thread_tail
             if not thread_id:
                 self.write_json({"error": "missing thread id"}, status=400)
