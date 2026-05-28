@@ -205,5 +205,58 @@
       }
     },
     "updatedAt": "2026-05-28T01:42:02.921979Z"
+  },
+  "turn:019e6c2e-64eb-7290-9a16-a2924290fa9d:ae3de2e7-3b4d-4e2f-bbdb-d017d9fb4253": {
+    "kind": "turn",
+    "threadId": "019e6c2e-64eb-7290-9a16-a2924290fa9d",
+    "requestId": "ae3de2e7-3b4d-4e2f-bbdb-d017d9fb4253",
+    "status": 202,
+    "response": {
+      "ok": true,
+      "accepted": true,
+      "completed": false,
+      "status": "processing",
+      "source": "codex-app-server",
+      "threadId": "019e6c2e-64eb-7290-9a16-a2924290fa9d",
+      "turnId": "019e6c3f-29c4-7282-845d-ce17f5ecdd41",
+      "agentText": "",
+      "notificationCounts": {},
+      "checkpoint": {
+        "ok": true,
+        "isGitRepo": true,
+        "root": "D:/__MY APPS/codex link for android",
+        "checkpointHash": "54417bcd86dc972df98813365846be961dadb750",
+        "checkpointShortHash": "54417bc",
+        "createdCommit": true,
+        "commitOutput": "[main 54417bc] Codex Link checkpoint (before-phone-turn) 2026-05-28 01:42:17 UTC\n 1 file changed, 34 insertions(+)",
+        "checkpoint": {
+          "cwd": "D:/__MY APPS/codex link for android",
+          "threadId": "019e6c2e-64eb-7290-9a16-a2924290fa9d",
+          "hash": "54417bcd86dc972df98813365846be961dadb750",
+          "label": "before-phone-turn",
+          "createdAt": "2026-05-28T01:42:17.383078Z"
+        }
+      }
+    },
+    "updatedAt": "2026-05-28T01:42:19.334284Z"
+  },
+  "thread-start::cc3a5bce-4406-40ed-b472-74e34494c875": {
+    "kind": "thread-start",
+    "threadId": "",
+    "requestId": "cc3a5bce-4406-40ed-b472-74e34494c875",
+    "status": 200,
+    "response": {
+      "ok": true,
+      "accepted": true,
+      "completed": false,
+      "status": "processing",
+      "source": "codex-app-server",
+      "threadId": "019e6c42-cee0-7a53-8eb9-745b2df71f03",
+      "cwd": "D:\\__MY APPS\\codex link for android",
+      "turnId": "019e6c42-d2c5-7ad2-aa89-af9dbee0f195",
+      "agentText": "",
+      "notificationCounts": {}
+    },
+    "updatedAt": "2026-05-28T01:46:19.207225Z"
   }
 }

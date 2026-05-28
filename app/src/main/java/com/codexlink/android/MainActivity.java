@@ -247,6 +247,7 @@ public class MainActivity extends Activity {
     private JSONArray loadedThreadMessages = new JSONArray();
     private JSONArray loadedLiveEvents = new JSONArray();
     private String lastRenderedThreadSignature = "";
+    private View liveOutputPanelView;
     private final ArrayList<QueuedTurn> queuedThreadTurns = new ArrayList<>();
     private final ArrayList<View> renderedMessageViews = new ArrayList<>();
     private final ArrayList<String> renderedMessageTexts = new ArrayList<>();
@@ -2404,6 +2405,9 @@ public class MainActivity extends Activity {
         boolean isProcessing = currentThreadActive || currentThreadStaleActive || isSendingThreadTurn;
         updateForegroundThreadState();
         maybeNotifyThreadCompleted(wasProcessing, isProcessing);
+        if (!isProcessing) {
+            clearLiveOutputPanelFromScreen();
+        }
         syncRequestStatusWithThreadState();
         setThreadTurnStatus(processingStatusText(), false);
     }
@@ -2427,6 +2431,7 @@ public class MainActivity extends Activity {
 
     private void renderThreadMessages(String endpoint) {
         messageListLayout.removeAllViews();
+        liveOutputPanelView = null;
         renderMergedMessages(endpoint);
         renderLiveOutputPanel();
         renderInlinePendingTurns(endpoint);
@@ -2608,8 +2613,43 @@ public class MainActivity extends Activity {
         }
 
         messageListLayout.addView(panel, matchWrap());
+        liveOutputPanelView = panel;
         renderedMessageViews.add(panel);
         renderedMessageTexts.add(("live output\n" + searchable).toLowerCase(Locale.US));
+    }
+
+    private void clearLiveOutputPanelFromScreen() {
+        loadedLiveEvents = new JSONArray();
+        liveOutputExpanded = false;
+        if (messageListLayout == null || liveOutputPanelView == null) {
+            return;
+        }
+
+        int previousScrollY = rootScrollView == null ? 0 : rootScrollView.getScrollY();
+        boolean wasNearBottom = isNearThreadBottom();
+        View panel = liveOutputPanelView;
+        int index = renderedMessageViews.indexOf(panel);
+        messageListLayout.removeView(panel);
+        if (index >= 0) {
+            renderedMessageViews.remove(index);
+            if (index < renderedMessageTexts.size()) {
+                renderedMessageTexts.remove(index);
+            }
+        } else {
+            renderedMessageViews.remove(panel);
+        }
+        liveOutputPanelView = null;
+        updateThreadSearchMatches();
+
+        if (rootScrollView != null) {
+            rootScrollView.post(() -> {
+                if (wasNearBottom) {
+                    scrollThreadToBottom(false);
+                } else {
+                    rootScrollView.scrollTo(0, previousScrollY);
+                }
+            });
+        }
     }
 
     private String liveOutputSummary(boolean running) {
@@ -3784,6 +3824,7 @@ public class MainActivity extends Activity {
         editingQueuedImages = null;
         loadedThreadMessages = new JSONArray();
         loadedLiveEvents = new JSONArray();
+        liveOutputPanelView = null;
         lastRenderedThreadSignature = "";
         currentThreadSearchQuery = "";
         currentThreadSearchMatch = -1;

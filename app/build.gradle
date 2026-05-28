@@ -7,6 +7,9 @@ def localPropertiesFile = rootProject.file("local.properties")
 if (localPropertiesFile.exists()) {
     localPropertiesFile.withInputStream { stream -> localProperties.load(stream) }
 }
+def defaultWebToken = providers.gradleProperty("codexLinkDefaultWebToken")
+        .orElse(localProperties.getProperty("codexLinkDefaultWebToken", ""))
+        .get()
 
 android {
     namespace = "com.codexlink.android"
@@ -20,9 +23,9 @@ android {
         applicationId = "com.codexlink.android"
         minSdk = 26
         targetSdk = 36
-        versionCode = 35
-        versionName = "0.1.36"
-        buildConfigField "String", "CODEX_LINK_DEFAULT_WEB_TOKEN", "\"${(localProperties.getProperty("codexLinkDefaultWebToken", "")).replace("\\", "\\\\").replace("\"", "\\\"")}\""
+        versionCode = 37
+        versionName = "0.1.38"
+        buildConfigField "String", "CODEX_LINK_DEFAULT_WEB_TOKEN", "\"${defaultWebToken.replace("\\", "\\\\").replace("\"", "\\\"")}\""
     }
 
     compileOptions {
