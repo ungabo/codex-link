@@ -258,5 +258,58 @@
       "notificationCounts": {}
     },
     "updatedAt": "2026-05-28T01:46:19.207225Z"
+  },
+  "turn:019e6c42-cee0-7a53-8eb9-745b2df71f03:f854b4ca-9e71-45be-9573-6bd9a8acf0df": {
+    "kind": "turn",
+    "threadId": "019e6c42-cee0-7a53-8eb9-745b2df71f03",
+    "requestId": "f854b4ca-9e71-45be-9573-6bd9a8acf0df",
+    "status": 202,
+    "response": {
+      "ok": true,
+      "accepted": true,
+      "completed": false,
+      "status": "processing",
+      "source": "codex-app-server",
+      "threadId": "019e6c42-cee0-7a53-8eb9-745b2df71f03",
+      "turnId": "019e6c4a-c497-7ff2-8ff4-54b8470ec7c6",
+      "agentText": "",
+      "notificationCounts": {},
+      "checkpoint": {
+        "ok": true,
+        "isGitRepo": true,
+        "root": "D:/__MY APPS/codex link for android",
+        "checkpointHash": "11096b7469b9e57ebb9aed646ec1c9e60baac89d",
+        "checkpointShortHash": "11096b7",
+        "createdCommit": true,
+        "commitOutput": "[main 11096b7] Codex Link checkpoint (before-phone-turn) 2026-05-28 01:54:55 UTC\n 6 files changed, 104 insertions(+), 5 deletions(-)",
+        "checkpoint": {
+          "cwd": "D:/__MY APPS/codex link for android",
+          "threadId": "019e6c42-cee0-7a53-8eb9-745b2df71f03",
+          "hash": "11096b7469b9e57ebb9aed646ec1c9e60baac89d",
+          "label": "before-phone-turn",
+          "createdAt": "2026-05-28T01:54:56.957332Z"
+        }
+      }
+    },
+    "updatedAt": "2026-05-28T01:54:59.864920Z"
+  },
+  "thread-start::eb14b6c9-331c-4b71-9d24-47c5669c9000": {
+    "kind": "thread-start",
+    "threadId": "",
+    "requestId": "eb14b6c9-331c-4b71-9d24-47c5669c9000",
+    "status": 200,
+    "response": {
+      "ok": true,
+      "accepted": true,
+      "completed": false,
+      "status": "processing",
+      "source": "codex-app-server",
+      "threadId": "019e6c51-9bd7-78e3-be82-aca8d5a44b7a",
+      "cwd": "D:\\__MY APPS\\codex link for android",
+      "turnId": "019e6c51-9f2b-7152-8a94-56647a57077b",
+      "agentText": "",
+      "notificationCounts": {}
+    },
+    "updatedAt": "2026-05-28T02:02:29.037243Z"
   }
 }

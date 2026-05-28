@@ -5105,8 +5105,10 @@ public class MainActivity extends Activity {
         queuedThreadTurns.clear();
         loadedQueueItemIds.clear();
         queueThreadId = threadId;
+        pruneAcceptedQueuedTurnsFromDisk(threadId);
         File file = queueFileForThread(threadId);
         if (!file.exists()) {
+            syncRequestStatusWithAcceptedHistory(threadId);
             renderQueuedTurns();
             return;
         }
@@ -5135,6 +5137,7 @@ public class MainActivity extends Activity {
         } catch (Exception error) {
             Log.w(TAG, "Could not load queue for thread " + threadId, error);
         }
+        syncRequestStatusWithAcceptedHistory(threadId);
         if (isEditingQueuedTurn() && queuedTurnById(editingQueuedTurnId) == null) {
             editingQueuedTurnId = "";
             editingQueuedImages = null;
@@ -5144,6 +5147,147 @@ public class MainActivity extends Activity {
         }
         renderQueuedTurns();
         maybeRunQueuedTurnSoon();
+    }
+
+    private boolean pruneAcceptedQueuedTurnsFromDisk(String threadId) {
+        if (threadId == null || threadId.isEmpty()) {
+            return false;
+        }
+        File queueFile = queueFileForThread(threadId);
+        File historyFile = sentQueueFileForThread(threadId);
+        if (!queueFile.exists() || !historyFile.exists()) {
+            return false;
+        }
+
+        synchronized (QueueStorage.LOCK) {
+            HashSet<String> acceptedIds = acceptedQueueHistoryIdsLocked(historyFile);
+            if (acceptedIds.isEmpty()) {
+                return false;
+            }
+            JSONArray existing = QueueStorage.readArray(queueFile);
+            JSONArray cleaned = new JSONArray();
+            boolean changed = false;
+            for (int index = 0; index < existing.length(); index++) {
+                JSONObject item = existing.optJSONObject(index);
+                if (item == null) {
+                    continue;
+                }
+                String id = item.optString("id", "");
+                String payloadId = requestIdForPayload(item.optJSONObject("payload"));
+                if ((!id.isEmpty() && acceptedIds.contains(id))
+                        || (!payloadId.isEmpty() && acceptedIds.contains(payloadId))) {
+                    changed = true;
+                    continue;
+                }
+                cleaned.put(item);
+            }
+            if (!changed) {
+                return false;
+            }
+            try {
+                QueueStorage.writeArrayAtomic(queueFile, cleaned);
+                return true;
+            } catch (Exception error) {
+                Log.w(TAG, "Could not prune accepted queue items for " + threadId, error);
+                return false;
+            }
+        }
+    }
+
+    private HashSet<String> acceptedQueueHistoryIdsLocked(File historyFile) {
+        HashSet<String> ids = new HashSet<>();
+        JSONArray history = QueueStorage.readArray(historyFile);
+        for (int index = 0; index < history.length(); index++) {
+            JSONObject item = history.optJSONObject(index);
+            if (item == null || !isAcceptedQueueHistoryStage(item.optString("stage", ""))) {
+                continue;
+            }
+            String id = item.optString("id", "");
+            if (!id.isEmpty()) {
+                ids.add(id);
+            }
+            String payloadId = requestIdForPayload(item.optJSONObject("payload"));
+            if (!payloadId.isEmpty()) {
+                ids.add(payloadId);
+            }
+        }
+        return ids;
+    }
+
+    private boolean isAcceptedQueueHistoryStage(String stage) {
+        return "Processing".equalsIgnoreCase(stage)
+                || "Completed".equalsIgnoreCase(stage)
+                || "Sent".equalsIgnoreCase(stage);
+    }
+
+    private void syncRequestStatusWithAcceptedHistory(String threadId) {
+        if (threadId == null || threadId.isEmpty()) {
+            return;
+        }
+        JSONObject item = latestAcceptedQueueHistoryItem(threadId, lastRequestId);
+        if (item == null) {
+            return;
+        }
+        String id = item.optString("id", "");
+        JSONObject payload = item.optJSONObject("payload");
+        String payloadId = requestIdForPayload(payload);
+        boolean matchesLastRequest = lastRequestId != null
+                && !lastRequestId.isEmpty()
+                && (lastRequestId.equals(id) || lastRequestId.equals(payloadId));
+        if (!matchesLastRequest && (!queuedThreadTurns.isEmpty() || !lastRequestId.isEmpty())) {
+            return;
+        }
+
+        String historyStage = item.optString("stage", "Completed");
+        String stage = "Processing".equalsIgnoreCase(historyStage) ? "Processing" : "Completed";
+        lastRequestStage = stage;
+        lastRequestSummary = requestSummary(payload);
+        lastRequestDetail = item.optString("detail", "");
+        lastRequestId = id.isEmpty() ? payloadId : id;
+        lastRequestIsError = false;
+        lastRequestAt = item.optLong("completedAt", item.optLong("sentAt", System.currentTimeMillis()));
+        renderRequestStatusPill();
+        persistThreadRequestStatus();
+    }
+
+    private JSONObject latestAcceptedQueueHistoryItem(String threadId, String requestId) {
+        File file = sentQueueFileForThread(threadId);
+        if (!file.exists()) {
+            return null;
+        }
+        synchronized (QueueStorage.LOCK) {
+            JSONArray history = QueueStorage.readArray(file);
+            JSONObject newest = null;
+            long newestAt = 0L;
+            for (int index = 0; index < history.length(); index++) {
+                JSONObject item = history.optJSONObject(index);
+                if (item == null || !isAcceptedQueueHistoryStage(item.optString("stage", ""))) {
+                    continue;
+                }
+                JSONObject payload = item.optJSONObject("payload");
+                String id = item.optString("id", "");
+                String payloadId = requestIdForPayload(payload);
+                if (requestId != null
+                        && !requestId.isEmpty()
+                        && !requestId.equals(id)
+                        && !requestId.equals(payloadId)) {
+                    continue;
+                }
+                long at = item.optLong("completedAt", item.optLong("sentAt", item.optLong("createdAt", 0L)));
+                if (newest == null || at >= newestAt) {
+                    newest = item;
+                    newestAt = at;
+                }
+            }
+            if (newest == null) {
+                return null;
+            }
+            try {
+                return new JSONObject(newest.toString());
+            } catch (JSONException error) {
+                return newest;
+            }
+        }
     }
 
     private void persistQueue() {
@@ -5349,6 +5493,8 @@ public class MainActivity extends Activity {
         }
         for (File file : files) {
             try {
+                String threadId = file.getName().substring(0, file.getName().length() - ".json".length());
+                pruneAcceptedQueuedTurnsFromDisk(threadId);
                 JSONArray array;
                 synchronized (QueueStorage.LOCK) {
                     array = QueueStorage.readArray(file);
@@ -5356,7 +5502,6 @@ public class MainActivity extends Activity {
                 if (array.length() == 0) {
                     continue;
                 }
-                String threadId = file.getName().substring(0, file.getName().length() - ".json".length());
                 long oldestAt = Long.MAX_VALUE;
                 String firstPrompt = "";
                 int imageCount = 0;

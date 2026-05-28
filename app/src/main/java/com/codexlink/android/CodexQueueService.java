@@ -31,6 +31,7 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.TimeZone;
 import java.util.concurrent.ExecutorService;
@@ -256,10 +257,10 @@ public class CodexQueueService extends Service {
                     ThreadState state = loadThreadState(config, queue.threadId);
                     Log.i(TAG, "Queue thread " + queue.threadId + " active=" + state.active);
                     if (state.staleActive) {
-                        sawStalledItem = true;
-                        lastStatus = staleStatusText(state);
-                        broadcastQueueChanged(queue.threadId, item, "Waiting", lastStatus, false);
-                        continue;
+                        lastStatus = staleStatusText(state) + " Queue paused so it does not resend the same item in a loop.";
+                        broadcastQueueChanged(queue.threadId, item, "Error", lastStatus, true);
+                        pauseQueue(lastStatus);
+                        return;
                     }
                     if (state.active) {
                         sawBusyThread = true;
@@ -328,9 +329,7 @@ public class CodexQueueService extends Service {
                 updateNotification("Codex Link queue waiting", lastStatus.isEmpty() ? "Waiting for active chats" : lastStatus);
                 sleepFor(15000);
             } else if (sawStalledItem) {
-                updateNotification("Codex Link queue needs attention", lastStatus.isEmpty() ? "A queued message needs edit, delete, or Try now" : lastStatus);
-                broadcastQueueChanged("", lastStatus.isEmpty() ? "A queued message needs edit, delete, or Try now." : lastStatus, true);
-                stopForegroundAndSelf();
+                pauseQueue(lastStatus.isEmpty() ? "A queued message needs edit, delete, or Try now." : lastStatus);
                 return;
             } else {
                 updateNotification("Codex Link queue retrying", lastStatus.isEmpty() ? "Queued sends could not complete" : lastStatus);
@@ -627,6 +626,17 @@ public class CodexQueueService extends Service {
         }
     }
 
+    private static String requestIdForPayload(JSONObject payload) {
+        if (payload == null) {
+            return "";
+        }
+        String id = payload.optString("androidRequestId", "");
+        if (id == null || id.isEmpty()) {
+            id = payload.optString("clientRequestId", "");
+        }
+        return id == null ? "" : id;
+    }
+
     private boolean isProcessingResponse(HttpResult result) {
         if (result == null || result.body == null || result.body.isEmpty()) {
             return result != null && result.status == 202;
@@ -674,12 +684,13 @@ public class CodexQueueService extends Service {
             return queues;
         }
         for (File file : files) {
+            String name = file.getName();
+            String threadId = name.substring(0, name.length() - ".json".length());
+            pruneAcceptedQueuedItems(threadId);
             ArrayList<QueueItem> items = readQueue(file);
             if (items.isEmpty()) {
                 continue;
             }
-            String name = file.getName();
-            String threadId = name.substring(0, name.length() - ".json".length());
             queues.add(new QueueFile(threadId, file, items));
         }
         Collections.sort(queues, (left, right) -> Long.compare(left.oldestAt(), right.oldestAt()));
@@ -718,6 +729,77 @@ public class CodexQueueService extends Service {
             }
         }
         return items;
+    }
+
+    private boolean pruneAcceptedQueuedItems(String threadId) {
+        if (threadId == null || threadId.isEmpty()) {
+            return false;
+        }
+        File queueFile = queueFileForThread(threadId);
+        File historyFile = sentQueueFileForThread(threadId);
+        if (!queueFile.exists() || !historyFile.exists()) {
+            return false;
+        }
+        synchronized (QueueStorage.LOCK) {
+            HashSet<String> acceptedIds = acceptedQueueHistoryIdsLocked(historyFile);
+            if (acceptedIds.isEmpty()) {
+                return false;
+            }
+            JSONArray existing = QueueStorage.readArray(queueFile);
+            JSONArray cleaned = new JSONArray();
+            boolean changed = false;
+            for (int index = 0; index < existing.length(); index++) {
+                JSONObject item = existing.optJSONObject(index);
+                if (item == null) {
+                    continue;
+                }
+                String id = item.optString("id", "");
+                String payloadId = requestIdForPayload(item.optJSONObject("payload"));
+                if ((!id.isEmpty() && acceptedIds.contains(id))
+                        || (!payloadId.isEmpty() && acceptedIds.contains(payloadId))) {
+                    clearFailure(threadId, id);
+                    changed = true;
+                    continue;
+                }
+                cleaned.put(item);
+            }
+            if (!changed) {
+                return false;
+            }
+            try {
+                QueueStorage.writeArrayAtomic(queueFile, cleaned);
+                return true;
+            } catch (Exception error) {
+                Log.w(TAG, "Could not prune accepted queue items for " + threadId, error);
+                return false;
+            }
+        }
+    }
+
+    private HashSet<String> acceptedQueueHistoryIdsLocked(File historyFile) {
+        HashSet<String> ids = new HashSet<>();
+        JSONArray history = QueueStorage.readArray(historyFile);
+        for (int index = 0; index < history.length(); index++) {
+            JSONObject item = history.optJSONObject(index);
+            if (item == null || !isAcceptedQueueHistoryStage(item.optString("stage", ""))) {
+                continue;
+            }
+            String id = item.optString("id", "");
+            if (!id.isEmpty()) {
+                ids.add(id);
+            }
+            String payloadId = requestIdForPayload(item.optJSONObject("payload"));
+            if (!payloadId.isEmpty()) {
+                ids.add(payloadId);
+            }
+        }
+        return ids;
+    }
+
+    private boolean isAcceptedQueueHistoryStage(String stage) {
+        return "Processing".equalsIgnoreCase(stage)
+                || "Completed".equalsIgnoreCase(stage)
+                || "Sent".equalsIgnoreCase(stage);
     }
 
     private void removeQueuedItem(String threadId, String itemId) {
