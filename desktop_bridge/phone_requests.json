@@ -137,5 +137,39 @@
       }
     },
     "updatedAt": "2026-05-28T01:27:28.838277Z"
+  },
+  "turn:019e6c2e-64eb-7290-9a16-a2924290fa9d:358d223c-082f-4e97-b7f9-054c70802d2c": {
+    "kind": "turn",
+    "threadId": "019e6c2e-64eb-7290-9a16-a2924290fa9d",
+    "requestId": "358d223c-082f-4e97-b7f9-054c70802d2c",
+    "status": 202,
+    "response": {
+      "ok": true,
+      "accepted": true,
+      "completed": false,
+      "status": "processing",
+      "source": "codex-app-server",
+      "threadId": "019e6c2e-64eb-7290-9a16-a2924290fa9d",
+      "turnId": "019e6c3d-6377-7462-817e-51b4d40c08e5",
+      "agentText": "",
+      "notificationCounts": {},
+      "checkpoint": {
+        "ok": true,
+        "isGitRepo": true,
+        "root": "D:/__MY APPS/codex link for android",
+        "checkpointHash": "5fc393cfdfdc143550372f698025949b8decb25f",
+        "checkpointShortHash": "5fc393c",
+        "createdCommit": true,
+        "commitOutput": "[main 5fc393c] Codex Link checkpoint (before-phone-turn) 2026-05-28 01:40:19 UTC\n 10 files changed, 384 insertions(+), 130 deletions(-)\n create mode 100644 app/src/main/java/com/codexlink/android/BootCompletedReceiver.java\n create mode 100644 app/src/main/java/com/codexlink/android/QueueStorage.java",
+        "checkpoint": {
+          "cwd": "D:/__MY APPS/codex link for android",
+          "threadId": "019e6c2e-64eb-7290-9a16-a2924290fa9d",
+          "hash": "5fc393cfdfdc143550372f698025949b8decb25f",
+          "label": "before-phone-turn",
+          "createdAt": "2026-05-28T01:40:21.054601Z"
+        }
+      }
+    },
+    "updatedAt": "2026-05-28T01:40:23.033150Z"
   }
 }
