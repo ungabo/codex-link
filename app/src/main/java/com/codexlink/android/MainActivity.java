@@ -63,6 +63,7 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -250,6 +251,7 @@ public class MainActivity extends Activity {
     private final ArrayList<View> renderedMessageViews = new ArrayList<>();
     private final ArrayList<String> renderedMessageTexts = new ArrayList<>();
     private final ArrayList<Integer> threadSearchMatches = new ArrayList<>();
+    private final HashSet<String> loadedQueueItemIds = new HashSet<>();
     private final Runnable threadPollRunnable = new Runnable() {
         @Override
         public void run() {
@@ -2739,12 +2741,27 @@ public class MainActivity extends Activity {
     }
 
     private boolean payloadIsQueued(JSONObject payload) {
+        String requestId = requestIdForPayload(payload);
+        if (requestId.isEmpty()) {
+            return false;
+        }
         for (QueuedTurn turn : queuedThreadTurns) {
-            if (samePayload(turn.payload, payload)) {
+            if (turn.id.equals(requestId) || requestId.equals(requestIdForPayload(turn.payload))) {
                 return true;
             }
         }
         return false;
+    }
+
+    private String requestIdForPayload(JSONObject payload) {
+        if (payload == null) {
+            return "";
+        }
+        String id = payload.optString("androidRequestId", "");
+        if (id == null || id.isEmpty()) {
+            id = payload.optString("clientRequestId", "");
+        }
+        return id == null ? "" : id;
     }
 
     private static void ensurePayloadRequestId(JSONObject payload, String requestId) {
@@ -2766,20 +2783,9 @@ public class MainActivity extends Activity {
         if (left == null || right == null) {
             return false;
         }
-        String leftRequestId = left.optString("androidRequestId", left.optString("clientRequestId", ""));
-        String rightRequestId = right.optString("androidRequestId", right.optString("clientRequestId", ""));
-        if (!leftRequestId.isEmpty() && leftRequestId.equals(rightRequestId)) {
-            return true;
-        }
-        long leftSentAt = left.optLong("sentAt", -1L);
-        long rightSentAt = right.optLong("sentAt", -2L);
-        if (leftSentAt > 0 && leftSentAt == rightSentAt) {
-            return true;
-        }
-        boolean leftHasImages = left.optJSONArray("images") != null;
-        boolean rightHasImages = right.optJSONArray("images") != null;
-        return left.optString("prompt", "").equals(right.optString("prompt", ""))
-                && leftHasImages == rightHasImages;
+        String leftRequestId = requestIdForPayload(left);
+        String rightRequestId = requestIdForPayload(right);
+        return !leftRequestId.isEmpty() && leftRequestId.equals(rightRequestId);
     }
 
     private void addRenderedMessage(String endpoint, String role, String body, JSONArray media) {
@@ -4248,7 +4254,7 @@ public class MainActivity extends Activity {
     private void queuePreparedThreadPayload(JSONObject payload, String statusMessage, boolean isError) {
         ensureQueueLoadedForCurrentThread();
         QueuedTurn queuedTurn = queuedTurnForPayload(payload);
-        if (!payloadIsQueued(payload)) {
+        if (queuedTurn == null) {
             queuedTurn = new QueuedTurn(payload);
             queuedThreadTurns.add(queuedTurn);
             persistQueue();
@@ -4267,8 +4273,12 @@ public class MainActivity extends Activity {
     }
 
     private QueuedTurn queuedTurnForPayload(JSONObject payload) {
+        String requestId = requestIdForPayload(payload);
+        if (requestId.isEmpty()) {
+            return null;
+        }
         for (QueuedTurn turn : queuedThreadTurns) {
-            if (samePayload(turn.payload, payload)) {
+            if (turn.id.equals(requestId) || requestId.equals(requestIdForPayload(turn.payload))) {
                 return turn;
             }
         }
@@ -4366,17 +4376,33 @@ public class MainActivity extends Activity {
     }
 
     private void startQueueWorkerIfNeeded() {
-        if (allQueueInfo().isEmpty()) {
+        ArrayList<QueueInfo> queues = allQueueInfo();
+        if (queues.isEmpty()) {
             return;
         }
+        boolean currentHasQueue = hasQueueForCurrentThread(queues);
         if (isQueuePaused()) {
             String detail = queuePausedDetail();
-            setThreadTurnStatus(detail.isEmpty() ? "Queue paused. Tap Resume queue to continue." : detail, false);
+            if (currentHasQueue) {
+                setThreadTurnStatus(detail.isEmpty() ? "Queue paused. Tap Resume queue to continue." : detail, false);
+            }
             maybePromptResumeQueue();
             renderQueuedTurns();
             return;
         }
-        startQueueWorker("Queue worker running.");
+        startQueueWorker(currentHasQueue ? "Queue worker running." : "");
+    }
+
+    private boolean hasQueueForCurrentThread(ArrayList<QueueInfo> queues) {
+        if (currentThreadId == null || currentThreadId.isEmpty() || queues == null) {
+            return false;
+        }
+        for (QueueInfo info : queues) {
+            if (currentThreadId.equals(info.threadId)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void startQueueWorker(String statusMessage) {
@@ -4462,22 +4488,28 @@ public class MainActivity extends Activity {
         String requestId = intent == null ? "" : intent.getStringExtra(CodexQueueService.EXTRA_REQUEST_ID);
         if (currentThreadId != null && !currentThreadId.isEmpty()) {
             reloadCurrentThreadQueueFromDisk();
-            if (status != null && !status.isEmpty() && (threadId == null || threadId.isEmpty() || currentThreadId.equals(threadId))) {
+            boolean appliesToCurrentThread = threadId != null && !threadId.isEmpty() && currentThreadId.equals(threadId);
+            boolean globalQueueUpdate = threadId == null || threadId.isEmpty();
+            if (status != null && !status.isEmpty() && appliesToCurrentThread) {
                 setThreadTurnStatus(status, isError);
-            } else {
+            } else if (appliesToCurrentThread) {
                 setThreadTurnStatus(processingStatusText(), false);
             }
-            if (requestStage != null && !requestStage.isEmpty() && currentThreadId.equals(threadId)) {
+            if (requestStage != null && !requestStage.isEmpty() && appliesToCurrentThread) {
                 updateRequestStatusPill(requestStage, requestSummary, status, isError, requestId, true);
             }
-            if ("Stalled".equalsIgnoreCase(requestStage) || (isError && status != null && status.toLowerCase(Locale.US).contains("queue stalled"))) {
+            if (appliesToCurrentThread
+                    && ("Stalled".equalsIgnoreCase(requestStage) || (isError && status != null && status.toLowerCase(Locale.US).contains("queue stalled")))) {
                 setQueuePaused(true, status);
             }
-            if (threadId != null
-                    && threadId.equals(currentThreadId)
+            if (appliesToCurrentThread
                     && !normalizedEndpoint().isEmpty()
                     && shouldRefreshThreadForQueueStage(requestStage)) {
                 loadThreadPage(currentThreadId, currentThreadTitle, null, currentThreadFullLoaded, false);
+            }
+            if (globalQueueUpdate) {
+                renderQueuedTurns();
+                updateThreadComposerState();
             }
         } else if (status != null && !status.isEmpty()) {
             setCatalogStatus(status, isError);
@@ -4855,6 +4887,9 @@ public class MainActivity extends Activity {
             return "Sending to Windows.";
         }
         int index = queuedThreadTurns.indexOf(turn);
+        if (index == 0 && currentThreadStaleActive) {
+            return "Needs attention: Windows has a stale processing marker. Use Try now only if the desktop chat is idle.";
+        }
         if (index == 0 && currentThreadActive) {
             return "Waiting: Windows is processing the current request. This sends next.";
         }
@@ -4870,6 +4905,9 @@ public class MainActivity extends Activity {
         }
         if (turn != null && samePayload(turn.payload, sendingThreadPayload)) {
             return Color.rgb(126, 87, 19);
+        }
+        if (currentThreadStaleActive) {
+            return COLOR_ACCENT;
         }
         return currentThreadActive ? Color.rgb(126, 87, 19) : COLOR_MUTED;
     }
@@ -5024,6 +5062,7 @@ public class MainActivity extends Activity {
 
     private void loadQueueForThread(String threadId) {
         queuedThreadTurns.clear();
+        loadedQueueItemIds.clear();
         queueThreadId = threadId;
         File file = queueFileForThread(threadId);
         if (!file.exists()) {
@@ -5031,14 +5070,11 @@ public class MainActivity extends Activity {
             return;
         }
 
-        try (InputStream input = new FileInputStream(file);
-             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-            byte[] buffer = new byte[4096];
-            int read;
-            while ((read = input.read(buffer)) != -1) {
-                output.write(buffer, 0, read);
+        try {
+            JSONArray array;
+            synchronized (QueueStorage.LOCK) {
+                array = QueueStorage.readArray(file);
             }
-            JSONArray array = new JSONArray(output.toString(StandardCharsets.UTF_8.name()));
             for (int index = 0; index < array.length(); index++) {
                 JSONObject item = array.optJSONObject(index);
                 if (item == null) {
@@ -5048,10 +5084,12 @@ public class MainActivity extends Activity {
                 if (payload == null) {
                     continue;
                 }
-                queuedThreadTurns.add(new QueuedTurn(
+                QueuedTurn turn = new QueuedTurn(
                         payload,
                         item.optString("id", ""),
-                        item.optLong("createdAt", 0L)));
+                        item.optLong("createdAt", 0L));
+                queuedThreadTurns.add(turn);
+                loadedQueueItemIds.add(turn.id);
             }
         } catch (Exception error) {
             Log.w(TAG, "Could not load queue for thread " + threadId, error);
@@ -5073,19 +5111,46 @@ public class MainActivity extends Activity {
         }
         try {
             File file = queueFileForThread(queueThreadId);
-            File parent = file.getParentFile();
-            if (parent != null && !parent.exists()) {
-                parent.mkdirs();
-            }
-            JSONArray array = new JSONArray();
-            for (QueuedTurn turn : queuedThreadTurns) {
-                array.put(new JSONObject()
-                        .put("id", turn.id)
-                        .put("createdAt", turn.createdAt)
-                        .put("payload", turn.payload));
-            }
-            try (FileOutputStream output = new FileOutputStream(file, false)) {
-                output.write(array.toString().getBytes(StandardCharsets.UTF_8));
+            synchronized (QueueStorage.LOCK) {
+                JSONArray disk = QueueStorage.readArray(file);
+                HashSet<String> diskIds = new HashSet<>();
+                for (int index = 0; index < disk.length(); index++) {
+                    JSONObject item = disk.optJSONObject(index);
+                    if (item != null) {
+                        String id = item.optString("id", "");
+                        if (!id.isEmpty()) {
+                            diskIds.add(id);
+                        }
+                    }
+                }
+
+                JSONArray array = new JSONArray();
+                HashSet<String> persistedIds = new HashSet<>();
+                for (QueuedTurn turn : queuedThreadTurns) {
+                    if (loadedQueueItemIds.contains(turn.id) && !diskIds.contains(turn.id)) {
+                        continue;
+                    }
+                    array.put(new JSONObject()
+                            .put("id", turn.id)
+                            .put("createdAt", turn.createdAt)
+                            .put("payload", turn.payload));
+                    persistedIds.add(turn.id);
+                }
+                for (int index = 0; index < disk.length(); index++) {
+                    JSONObject item = disk.optJSONObject(index);
+                    if (item == null) {
+                        continue;
+                    }
+                    String id = item.optString("id", "");
+                    if (!id.isEmpty() && !loadedQueueItemIds.contains(id) && !persistedIds.contains(id)) {
+                        array.put(item);
+                        persistedIds.add(id);
+                    }
+                }
+
+                QueueStorage.writeArrayAtomic(file, array);
+                loadedQueueItemIds.clear();
+                loadedQueueItemIds.addAll(persistedIds);
             }
         } catch (Exception error) {
             Log.w(TAG, "Could not persist queue", error);
@@ -5111,8 +5176,8 @@ public class MainActivity extends Activity {
         }
 
         File file = queueFileForThread(threadId);
-        synchronized (MainActivity.class) {
-            JSONArray existing = readJsonArrayFile(file);
+        synchronized (QueueStorage.LOCK) {
+            JSONArray existing = QueueStorage.readArray(file);
             JSONArray updated = new JSONArray();
             boolean removed = false;
             for (int index = 0; index < existing.length(); index++) {
@@ -5126,8 +5191,8 @@ public class MainActivity extends Activity {
                 }
                 updated.put(item);
             }
-            try (FileOutputStream output = new FileOutputStream(file, false)) {
-                output.write(updated.toString().getBytes(StandardCharsets.UTF_8));
+            try {
+                QueueStorage.writeArrayAtomic(file, updated);
             } catch (Exception error) {
                 Log.w(TAG, "Could not remove sent queued turn", error);
             }
@@ -5140,6 +5205,7 @@ public class MainActivity extends Activity {
         editingQueuedImages = null;
         sendingThreadPayload = null;
         editingQueuedTurnId = "";
+        loadedQueueItemIds.clear();
         updateEditingQueuePreference();
         clearSelectedImageState();
         updateQueueEditUi();
@@ -5241,14 +5307,11 @@ public class MainActivity extends Activity {
             return queues;
         }
         for (File file : files) {
-            try (InputStream input = new FileInputStream(file);
-                 ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-                byte[] buffer = new byte[4096];
-                int read;
-                while ((read = input.read(buffer)) != -1) {
-                    output.write(buffer, 0, read);
+            try {
+                JSONArray array;
+                synchronized (QueueStorage.LOCK) {
+                    array = QueueStorage.readArray(file);
                 }
-                JSONArray array = new JSONArray(output.toString(StandardCharsets.UTF_8.name()));
                 if (array.length() == 0) {
                     continue;
                 }
@@ -5342,13 +5405,9 @@ public class MainActivity extends Activity {
             return;
         }
         File file = sentQueueFileForThread(threadId);
-        synchronized (MainActivity.class) {
+        synchronized (QueueStorage.LOCK) {
             try {
-                File parent = file.getParentFile();
-                if (parent != null && !parent.exists()) {
-                    parent.mkdirs();
-                }
-                JSONArray array = readJsonArrayFile(file);
+                JSONArray array = QueueStorage.readArray(file);
                 array.put(new JSONObject()
                         .put("threadId", threadId)
                         .put("id", turn.id)
@@ -5362,9 +5421,7 @@ public class MainActivity extends Activity {
                 for (int index = start; index < array.length(); index++) {
                     trimmed.put(array.opt(index));
                 }
-                try (FileOutputStream output = new FileOutputStream(file, false)) {
-                    output.write(trimmed.toString().getBytes(StandardCharsets.UTF_8));
-                }
+                QueueStorage.writeArrayAtomic(file, trimmed);
             } catch (Exception error) {
                 Log.w(TAG, "Could not archive sent queued turn", error);
             }
@@ -5372,19 +5429,8 @@ public class MainActivity extends Activity {
     }
 
     private JSONArray readJsonArrayFile(File file) {
-        if (file == null || !file.exists()) {
-            return new JSONArray();
-        }
-        try (InputStream input = new FileInputStream(file);
-             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-            byte[] buffer = new byte[4096];
-            int read;
-            while ((read = input.read(buffer)) != -1) {
-                output.write(buffer, 0, read);
-            }
-            return new JSONArray(output.toString(StandardCharsets.UTF_8.name()));
-        } catch (Exception ignored) {
-            return new JSONArray();
+        synchronized (QueueStorage.LOCK) {
+            return QueueStorage.readArray(file);
         }
     }
 

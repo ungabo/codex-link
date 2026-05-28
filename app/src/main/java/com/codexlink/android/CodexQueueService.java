@@ -72,6 +72,8 @@ public class CodexQueueService extends Service {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private volatile boolean workerRunning = false;
     private volatile boolean stopRequested = false;
+    private String lastNotificationTitle = "";
+    private String lastNotificationText = "";
 
     private static class QueueItem {
         final String id;
@@ -125,6 +127,16 @@ public class CodexQueueService extends Service {
 
         boolean isOk() {
             return status >= 200 && status < 300;
+        }
+    }
+
+    private static class ProcessingMonitorResult {
+        final boolean active;
+        final boolean completed;
+
+        ProcessingMonitorResult(boolean active, boolean completed) {
+            this.active = active;
+            this.completed = completed;
         }
     }
 
@@ -188,21 +200,28 @@ public class CodexQueueService extends Service {
                 stopForegroundAndSelf();
                 return;
             }
-            ArrayList<QueueFile> queues = allQueues();
-            int queuedCount = totalQueuedCount(queues);
-            Log.i(TAG, "Queue pass found " + queuedCount + " queued message(s) in " + queues.size() + " chat(s).");
-            if (queuedCount == 0) {
-                broadcastQueueChanged("", "Queue empty.", false);
-                stopForegroundAndSelf();
-                return;
-            }
-
-            updateNotification("Sending queued Codex messages", queuedCount + " queued");
             EndpointConfig config = endpointConfig();
             if (config.endpoint.isEmpty()) {
                 pauseQueue("No Codex Link endpoint is configured.");
                 return;
             }
+            ArrayList<QueueFile> queues = allQueues();
+            int queuedCount = totalQueuedCount(queues);
+            ProcessingMonitorResult monitor = monitorProcessingHistories(config);
+            Log.i(TAG, "Queue pass found " + queuedCount + " queued message(s) in " + queues.size() + " chat(s).");
+            if (queuedCount == 0) {
+                if (monitor.active) {
+                    broadcastQueueChanged("", "Accepted Codex request is still processing in Windows.", false);
+                    updateNotification("Codex Link waiting for Windows", "Accepted request is still processing");
+                    sleepFor(15000);
+                    continue;
+                }
+                broadcastQueueChanged("", monitor.completed ? "Accepted Codex request completed." : "Queue empty.", false);
+                stopForegroundAndSelf();
+                return;
+            }
+
+            updateNotification("Sending queued Codex messages", queuedCount + " queued");
 
             boolean madeProgress = false;
             boolean sawBusyThread = false;
@@ -236,6 +255,12 @@ public class CodexQueueService extends Service {
                 try {
                     ThreadState state = loadThreadState(config, queue.threadId);
                     Log.i(TAG, "Queue thread " + queue.threadId + " active=" + state.active);
+                    if (state.staleActive) {
+                        sawStalledItem = true;
+                        lastStatus = staleStatusText(state);
+                        broadcastQueueChanged(queue.threadId, item, "Waiting", lastStatus, false);
+                        continue;
+                    }
                     if (state.active) {
                         sawBusyThread = true;
                         lastStatus = activeStatusText(state);
@@ -423,7 +448,9 @@ public class CodexQueueService extends Service {
             staleActive = thread.optBoolean("staleActive", activity.optBoolean("staleActive", staleActive));
         }
         return new ThreadState(
-                active && !staleActive,
+                active,
+                staleActive,
+                thread.optString("staleReason", activity == null ? "" : activity.optString("staleReason", "")),
                 thread.optString("status", activity == null ? "" : activity.optString("status", "")),
                 thread.optString("activeTurnId", activity == null ? "" : activity.optString("activeTurnId", "")),
                 thread.optString("activeStartedAt", activity == null ? "" : activity.optString("activeStartedAt", "")),
@@ -432,18 +459,34 @@ public class CodexQueueService extends Service {
 
     private static class ThreadState {
         final boolean active;
+        final boolean staleActive;
+        final String staleReason;
         final String status;
         final String activeTurnId;
         final String activeStartedAt;
         final int activeCount;
 
-        ThreadState(boolean active, String status, String activeTurnId, String activeStartedAt, int activeCount) {
+        ThreadState(boolean active, boolean staleActive, String staleReason, String status, String activeTurnId, String activeStartedAt, int activeCount) {
             this.active = active;
+            this.staleActive = staleActive;
+            this.staleReason = staleReason == null ? "" : staleReason;
             this.status = status == null ? "" : status;
             this.activeTurnId = activeTurnId == null ? "" : activeTurnId;
             this.activeStartedAt = activeStartedAt == null ? "" : activeStartedAt;
             this.activeCount = activeCount;
         }
+    }
+
+    private String staleStatusText(ThreadState state) {
+        StringBuilder builder = new StringBuilder();
+        builder.append("Stale processing state. Confirm the desktop chat is idle, then use Try now for this queued item.");
+        if (state != null && !state.activeStartedAt.isEmpty()) {
+            builder.append(" Started ").append(formatIsoForStatus(state.activeStartedAt)).append(".");
+        }
+        if (state != null && !state.staleReason.isEmpty()) {
+            builder.append(" Reason: ").append(state.staleReason).append(".");
+        }
+        return builder.toString();
     }
 
     private String activeStatusText(ThreadState state) {
@@ -653,18 +696,12 @@ public class CodexQueueService extends Service {
 
     private ArrayList<QueueItem> readQueue(File file) {
         ArrayList<QueueItem> items = new ArrayList<>();
-        synchronized (CodexQueueService.class) {
+        synchronized (QueueStorage.LOCK) {
             if (!file.exists()) {
                 return items;
             }
-            try (InputStream input = new FileInputStream(file);
-                 ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-                byte[] buffer = new byte[4096];
-                int read;
-                while ((read = input.read(buffer)) != -1) {
-                    output.write(buffer, 0, read);
-                }
-                JSONArray array = new JSONArray(output.toString(StandardCharsets.UTF_8.name()));
+            try {
+                JSONArray array = QueueStorage.readArray(file);
                 for (int index = 0; index < array.length(); index++) {
                     JSONObject object = array.optJSONObject(index);
                     if (object == null) {
@@ -685,7 +722,7 @@ public class CodexQueueService extends Service {
 
     private void removeQueuedItem(String threadId, String itemId) {
         File file = queueFileForThread(threadId);
-        synchronized (CodexQueueService.class) {
+        synchronized (QueueStorage.LOCK) {
             ArrayList<QueueItem> items = readQueue(file);
             JSONArray array = new JSONArray();
             boolean removed = false;
@@ -696,8 +733,8 @@ public class CodexQueueService extends Service {
                 }
                 array.put(queueItemJson(item));
             }
-            try (FileOutputStream output = new FileOutputStream(file, false)) {
-                output.write(array.toString().getBytes(StandardCharsets.UTF_8));
+            try {
+                QueueStorage.writeArrayAtomic(file, array);
             } catch (Exception error) {
                 Log.w(TAG, "Could not update queue " + threadId, error);
             }
@@ -709,13 +746,9 @@ public class CodexQueueService extends Service {
             return;
         }
         File file = sentQueueFileForThread(threadId);
-        synchronized (CodexQueueService.class) {
+        synchronized (QueueStorage.LOCK) {
             try {
-                File parent = file.getParentFile();
-                if (parent != null && !parent.exists()) {
-                    parent.mkdirs();
-                }
-                JSONArray array = readJsonArrayFile(file);
+                JSONArray array = QueueStorage.readArray(file);
                 array.put(new JSONObject()
                         .put("threadId", threadId)
                         .put("id", item.id)
@@ -729,9 +762,7 @@ public class CodexQueueService extends Service {
                 for (int index = start; index < array.length(); index++) {
                     trimmed.put(array.opt(index));
                 }
-                try (FileOutputStream output = new FileOutputStream(file, false)) {
-                    output.write(trimmed.toString().getBytes(StandardCharsets.UTF_8));
-                }
+                QueueStorage.writeArrayAtomic(file, trimmed);
             } catch (Exception error) {
                 Log.w(TAG, "Could not archive sent queue item " + threadId, error);
             }
@@ -743,8 +774,8 @@ public class CodexQueueService extends Service {
             return;
         }
         File file = sentQueueFileForThread(threadId);
-        synchronized (CodexQueueService.class) {
-            JSONArray array = readJsonArrayFile(file);
+        synchronized (QueueStorage.LOCK) {
+            JSONArray array = QueueStorage.readArray(file);
             boolean changed = false;
             long completedAt = System.currentTimeMillis();
             for (int index = 0; index < array.length(); index++) {
@@ -766,8 +797,8 @@ public class CodexQueueService extends Service {
             if (!changed) {
                 return;
             }
-            try (FileOutputStream output = new FileOutputStream(file, false)) {
-                output.write(array.toString().getBytes(StandardCharsets.UTF_8));
+            try {
+                QueueStorage.writeArrayAtomic(file, array);
                 NotificationHelper.showTurnCompletedNotification(this, threadId, "");
             } catch (Exception error) {
                 Log.w(TAG, "Could not mark queue history completed for " + threadId, error);
@@ -775,20 +806,55 @@ public class CodexQueueService extends Service {
         }
     }
 
-    private JSONArray readJsonArrayFile(File file) {
-        if (file == null || !file.exists()) {
-            return new JSONArray();
+    private ProcessingMonitorResult monitorProcessingHistories(EndpointConfig config) {
+        File dir = new File(getFilesDir(), "queue-history");
+        File[] files = dir.listFiles((file, name) -> name.endsWith(".json"));
+        if (files == null || files.length == 0) {
+            return new ProcessingMonitorResult(false, false);
         }
-        try (InputStream input = new FileInputStream(file);
-             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-            byte[] buffer = new byte[4096];
-            int read;
-            while ((read = input.read(buffer)) != -1) {
-                output.write(buffer, 0, read);
+
+        boolean sawActive = false;
+        boolean completedAny = false;
+        for (File file : files) {
+            String name = file.getName();
+            String threadId = name.substring(0, name.length() - ".json".length());
+            if (!historyHasProcessingItem(file)) {
+                continue;
             }
-            return new JSONArray(output.toString(StandardCharsets.UTF_8.name()));
-        } catch (Exception ignored) {
-            return new JSONArray();
+            try {
+                ThreadState state = loadThreadState(config, threadId);
+                if (state.active || state.staleActive) {
+                    sawActive = true;
+                    continue;
+                }
+                markThreadProcessingHistoryCompleted(
+                        threadId,
+                        "Windows is idle. The accepted request finished.");
+                completedAny = true;
+            } catch (Exception error) {
+                sawActive = true;
+                Log.w(TAG, "Could not monitor processing queue history for " + threadId, error);
+            }
+        }
+        return new ProcessingMonitorResult(sawActive, completedAny);
+    }
+
+    private boolean historyHasProcessingItem(File file) {
+        synchronized (QueueStorage.LOCK) {
+            JSONArray array = QueueStorage.readArray(file);
+            for (int index = 0; index < array.length(); index++) {
+                JSONObject item = array.optJSONObject(index);
+                if (item != null && "Processing".equalsIgnoreCase(item.optString("stage", ""))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private JSONArray readJsonArrayFile(File file) {
+        synchronized (QueueStorage.LOCK) {
+            return QueueStorage.readArray(file);
         }
     }
 
@@ -822,7 +888,7 @@ public class CodexQueueService extends Service {
     private String threadEndpointFor(String endpoint, String threadId) throws IOException {
         URL url = new URL(endpoint);
         String encodedThreadId = URLEncoder.encode(threadId, StandardCharsets.UTF_8.name());
-        return new URL(url.getProtocol(), url.getHost(), url.getPort(), apiBasePathFor(url) + "threads/" + encodedThreadId + "?limit=1").toString();
+        return new URL(url.getProtocol(), url.getHost(), url.getPort(), apiBasePathFor(url) + "threads/" + encodedThreadId + "/status").toString();
     }
 
     private String threadTurnsEndpointFor(String endpoint, String threadId) throws IOException {
@@ -964,6 +1030,13 @@ public class CodexQueueService extends Service {
     }
 
     private void updateNotification(String title, String text) {
+        String cleanTitle = title == null ? "" : title;
+        String cleanText = text == null ? "" : text;
+        if (cleanTitle.equals(lastNotificationTitle) && cleanText.equals(lastNotificationText)) {
+            return;
+        }
+        lastNotificationTitle = cleanTitle;
+        lastNotificationText = cleanText;
         NotificationHelper.showQueueNotification(this, NOTIFICATION_ID, title, text, true);
     }
 

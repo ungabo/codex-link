@@ -103,5 +103,39 @@
       }
     },
     "updatedAt": "2026-05-28T01:25:02.256858Z"
+  },
+  "turn:019e6c2e-64eb-7290-9a16-a2924290fa9d:c134cdef-e141-4bda-97a9-8179245e3c19": {
+    "kind": "turn",
+    "threadId": "019e6c2e-64eb-7290-9a16-a2924290fa9d",
+    "requestId": "c134cdef-e141-4bda-97a9-8179245e3c19",
+    "status": 202,
+    "response": {
+      "ok": true,
+      "accepted": true,
+      "completed": false,
+      "status": "processing",
+      "source": "codex-app-server",
+      "threadId": "019e6c2e-64eb-7290-9a16-a2924290fa9d",
+      "turnId": "019e6c31-9340-7d23-bd4c-f875386e895f",
+      "agentText": "",
+      "notificationCounts": {},
+      "checkpoint": {
+        "ok": true,
+        "isGitRepo": true,
+        "root": "D:/__MY APPS/codex link for android",
+        "checkpointHash": "eba383ca2364bb864543af3a509f434b2a38bfcd",
+        "checkpointShortHash": "eba383c",
+        "createdCommit": true,
+        "commitOutput": "[main eba383c] Codex Link checkpoint (before-phone-turn) 2026-05-28 01:27:24 UTC\n 2 files changed, 67 insertions(+)",
+        "checkpoint": {
+          "cwd": "D:/__MY APPS/codex link for android",
+          "threadId": "019e6c2e-64eb-7290-9a16-a2924290fa9d",
+          "hash": "eba383ca2364bb864543af3a509f434b2a38bfcd",
+          "label": "before-phone-turn",
+          "createdAt": "2026-05-28T01:27:24.965164Z"
+        }
+      }
+    },
+    "updatedAt": "2026-05-28T01:27:28.838277Z"
   }
 }

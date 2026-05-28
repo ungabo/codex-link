@@ -12,6 +12,7 @@ import android.os.Build;
 
 final class NotificationHelper {
     private static final String CHANNEL_ID = "codex_link_status";
+    private static final String QUEUE_CHANNEL_ID = "codex_link_queue_v2";
     private static final String PREFS = "codex_link";
     private static final String PREF_FOREGROUND_ACTIVE = "foreground_active";
     private static final String PREF_FOREGROUND_THREAD_ID = "foreground_thread_id";
@@ -35,6 +36,12 @@ final class NotificationHelper {
                 NotificationManager.IMPORTANCE_DEFAULT);
         channel.setDescription("Install and connection status for Codex Link.");
         manager.createNotificationChannel(channel);
+        NotificationChannel queueChannel = new NotificationChannel(
+                QUEUE_CHANNEL_ID,
+                "Codex Link queue",
+                NotificationManager.IMPORTANCE_LOW);
+        queueChannel.setDescription("Background queue progress for Codex Link.");
+        manager.createNotificationChannel(queueChannel);
     }
 
     static void showInstalledNotification(Context context) {
@@ -80,8 +87,9 @@ final class NotificationHelper {
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? new Notification.Builder(context, CHANNEL_ID)
+                ? new Notification.Builder(context, QUEUE_CHANNEL_ID)
                 : new Notification.Builder(context);
+        builder.setOnlyAlertOnce(true);
         return builder
                 .setSmallIcon(android.R.drawable.stat_sys_upload)
                 .setContentTitle(title)
