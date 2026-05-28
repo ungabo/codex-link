@@ -262,20 +262,16 @@ public class CodexQueueService extends Service {
                 try {
                     ThreadState state = loadThreadState(config, queue.threadId);
                     Log.i(TAG, "Queue thread " + queue.threadId + " active=" + state.active);
-                    if (state.staleActive) {
-                        sawStalledItem = true;
-                        lastStatus = staleStatusText(state);
-                        markThreadProcessingHistoryCompleted(
-                                queue.threadId,
-                                "Windows reported stale processing. The phone preserved queued messages and stopped automatic retries.");
-                        broadcastQueueChanged(queue.threadId, item, "Stalled", lastStatus, true);
-                        continue;
-                    }
                     if (state.active) {
                         sawBusyThread = true;
                         lastStatus = activeStatusText(state);
                         broadcastQueueChanged(queue.threadId, item, "Waiting", lastStatus, false);
                         continue;
+                    }
+                    if (state.staleActive) {
+                        lastStatus = staleStatusText(state) + " Treating it as idle and continuing the queue.";
+                        markThreadProcessingHistoryCompleted(queue.threadId, lastStatus);
+                        broadcastQueueChanged(queue.threadId, item, "Recovered", lastStatus, false);
                     }
                     markThreadProcessingHistoryCompleted(
                             queue.threadId,
@@ -502,7 +498,7 @@ public class CodexQueueService extends Service {
 
     private String staleStatusText(ThreadState state) {
         StringBuilder builder = new StringBuilder();
-        builder.append("Stale processing state. Confirm the desktop chat is idle, then use Try now for this queued item.");
+        builder.append("Stale processing marker cleared because Windows now reports the chat as idle.");
         if (state != null && !state.activeStartedAt.isEmpty()) {
             builder.append(" Started ").append(formatIsoForStatus(state.activeStartedAt)).append(".");
         }

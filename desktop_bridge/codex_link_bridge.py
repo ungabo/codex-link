@@ -579,6 +579,11 @@ def thread_activity_for_path(rollout_path: Path, *, tail_only: bool = True) -> d
                 parsed_timestamp = seconds_from_timestamp(timestamp)
                 if parsed_timestamp:
                     last_event_seconds = parsed_timestamp
+                if active_turns:
+                    current_active = next(reversed(active_turns.values()))
+                    current_active["lastEventAt"] = timestamp
+                    if parsed_timestamp:
+                        current_active["lastEventSeconds"] = parsed_timestamp
 
             if event.get("type") != "event_msg":
                 continue

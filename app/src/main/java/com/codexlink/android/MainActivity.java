@@ -5145,7 +5145,7 @@ public class MainActivity extends Activity {
         }
         int index = queuedThreadTurns.indexOf(turn);
         if (index == 0 && currentThreadStaleActive) {
-            return "Needs attention: Windows has a stale processing marker. Use Try now only if the desktop chat is idle.";
+            return "Recovering: Windows has a stale processing marker but reports the chat is idle. The queue can continue.";
         }
         if (index == 0 && currentThreadActive) {
             return "Waiting: Windows is processing the current request. This sends next.";
@@ -6417,7 +6417,7 @@ public class MainActivity extends Activity {
             updateRequestStatusPill(
                     "Stale",
                     lastRequestSummary,
-                    "No recent desktop output. The queued item is preserved; use Try now only after confirming the desktop chat is idle.",
+                    "No recent desktop output. Windows reports the chat as idle, so queued items can continue.",
                     false,
                     lastRequestId,
                     true,

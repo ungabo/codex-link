@@ -24,8 +24,8 @@ android {
         applicationId = "com.codexlink.android"
         minSdk = 26
         targetSdk = 36
-        versionCode = 48
-        versionName = "0.1.49"
+        versionCode = 49
+        versionName = "0.1.50"
         buildConfigField "String", "CODEX_LINK_DEFAULT_WEB_TOKEN", "\"${defaultWebToken.replace("\\", "\\\\").replace("\"", "\\\"")}\""
         buildConfigField "String", "CODEX_LINK_BUILD_STAMP", "\"${buildStamp}\""
     }
