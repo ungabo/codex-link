@@ -110,6 +110,7 @@ public class MainActivity extends Activity {
     private static final String STATE_SELECTED_IMAGE_NAME = "selected_image_name";
     private static final String STATE_SELECTED_IMAGE_MIME = "selected_image_mime";
     private static final String STATE_EDITING_IMAGES = "editing_images";
+    private static final String STATE_EDITING_QUEUE_ID = "editing_queue_id";
     private static final String STATE_RANGE_START = "range_start";
     private static final String STATE_RANGE_END = "range_end";
     private static final String STATE_TOTAL_MESSAGES = "total_messages";
@@ -154,6 +155,7 @@ public class MainActivity extends Activity {
     private TextView requestStatusPillView;
     private TextView threadResponseText;
     private TextView attachmentStatusView;
+    private TextView queueEditStatusView;
     private TextView connectionSummaryView;
     private TextView appTitleView;
     private TextView installStampView;
@@ -168,6 +170,7 @@ public class MainActivity extends Activity {
     private LinearLayout threadComposerLayout;
     private LinearLayout threadResponseOverlay;
     private LinearLayout attachmentPreviewLayout;
+    private LinearLayout queueEditLayout;
     private LinearLayout queuedTurnListLayout;
     private View sendSectionSpacer;
     private View historySectionSpacer;
@@ -184,6 +187,7 @@ public class MainActivity extends Activity {
     private Button loadCatalogButton;
     private Button attachImageButton;
     private Button previewAttachmentButton;
+    private Button cancelQueueEditButton;
     private Button connectionToggleButton;
     private Button hostStatusButton;
     private Button queueOverviewButton;
@@ -201,6 +205,7 @@ public class MainActivity extends Activity {
     private Uri selectedImageUri;
     private String selectedImageName = "";
     private String selectedImageMimeType = "";
+    private String editingQueuedTurnId = "";
     private String lastRequestId = "";
     private String lastRequestStage = "";
     private String lastRequestSummary = "";
@@ -411,6 +416,7 @@ public class MainActivity extends Activity {
         outState.putString(STATE_SELECTED_IMAGE_NAME, selectedImageName);
         outState.putString(STATE_SELECTED_IMAGE_MIME, selectedImageMimeType);
         outState.putString(STATE_EDITING_IMAGES, editingQueuedImages == null ? "" : editingQueuedImages.toString());
+        outState.putString(STATE_EDITING_QUEUE_ID, editingQueuedTurnId);
         outState.putInt(STATE_RANGE_START, loadedRangeStart);
         outState.putInt(STATE_RANGE_END, loadedRangeEnd);
         outState.putInt(STATE_TOTAL_MESSAGES, totalThreadMessages);
@@ -735,6 +741,23 @@ public class MainActivity extends Activity {
         row.addView(threadSendButton, new LinearLayout.LayoutParams(dp(76), dp(46)));
 
         composer.addView(row, matchWrap());
+
+        queueEditLayout = new LinearLayout(this);
+        queueEditLayout.setOrientation(LinearLayout.HORIZONTAL);
+        queueEditLayout.setGravity(Gravity.CENTER_VERTICAL);
+        queueEditLayout.setPadding(0, dp(5), 0, 0);
+        queueEditLayout.setVisibility(View.GONE);
+
+        queueEditStatusView = text("Editing queued message", 12, COLOR_PRIMARY, Typeface.BOLD);
+        queueEditStatusView.setSingleLine(true);
+        queueEditStatusView.setEllipsize(TextUtils.TruncateAt.END);
+        queueEditLayout.addView(queueEditStatusView, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        cancelQueueEditButton = toolbarButton("Cancel", Color.WHITE, COLOR_MUTED);
+        cancelQueueEditButton.setBackground(outlineDrawable(Color.WHITE, COLOR_BORDER, dp(8)));
+        cancelQueueEditButton.setOnClickListener(view -> cancelQueuedEdit());
+        queueEditLayout.addView(cancelQueueEditButton, new LinearLayout.LayoutParams(dp(76), dp(34)));
+        composer.addView(queueEditLayout, matchWrap());
 
         attachmentPreviewLayout = new LinearLayout(this);
         attachmentPreviewLayout.setOrientation(LinearLayout.HORIZONTAL);
@@ -1173,7 +1196,9 @@ public class MainActivity extends Activity {
                 editingQueuedImages = null;
             }
         }
+        editingQueuedTurnId = state.getString(STATE_EDITING_QUEUE_ID, "");
         updateAttachmentPreview();
+        updateQueueEditUi();
 
         if (currentThreadId != null && !currentThreadId.isEmpty()) {
             ensureQueueLoadedForCurrentThread();
@@ -1230,7 +1255,9 @@ public class MainActivity extends Activity {
             if (!editingImages.isEmpty()) {
                 editingQueuedImages = new JSONArray(editingImages);
             }
+            editingQueuedTurnId = state.optString(STATE_EDITING_QUEUE_ID, "");
             updateAttachmentPreview();
+            updateQueueEditUi();
 
             ensureQueueLoadedForCurrentThread();
             setCatalogThreadMode(true);
@@ -1272,6 +1299,7 @@ public class MainActivity extends Activity {
                     .put(STATE_SELECTED_IMAGE_NAME, selectedImageName)
                     .put(STATE_SELECTED_IMAGE_MIME, selectedImageMimeType)
                     .put(STATE_EDITING_IMAGES, editingQueuedImages == null ? "" : editingQueuedImages.toString())
+                    .put(STATE_EDITING_QUEUE_ID, editingQueuedTurnId)
                     .put(STATE_ACTIONS_EXPANDED, threadActionsExpanded)
                     .put(STATE_LIVE_OUTPUT_EXPANDED, liveOutputExpanded)
                     .put(STATE_QUEUE_EXPANDED, queuedTurnsExpanded)
@@ -2229,6 +2257,8 @@ public class MainActivity extends Activity {
         } else if (wasProcessing) {
             liveOutputExpanded = false;
         }
+        updateForegroundThreadState();
+        maybeNotifyThreadCompleted(wasProcessing, isProcessing);
         lastRenderedThreadSignature = threadResponseSignature(response);
 
         renderThreadMessages(endpoint);
@@ -3604,6 +3634,8 @@ public class MainActivity extends Activity {
         queuedTurnsExpanded = false;
         currentThreadFullLoaded = false;
         sendingThreadPayload = null;
+        editingQueuedTurnId = "";
+        editingQueuedImages = null;
         loadedThreadMessages = new JSONArray();
         loadedLiveEvents = new JSONArray();
         lastRenderedThreadSignature = "";
@@ -3813,8 +3845,14 @@ public class MainActivity extends Activity {
             return;
         }
         if (prompt.isEmpty() && !hasAttachment) {
-            setThreadTurnStatus("Type a message or attach an image first.", true);
+            setThreadTurnStatus(isEditingQueuedTurn()
+                    ? "Original queued message is unchanged. Type replacement text, attach an image, or tap Cancel."
+                    : "Type a message or attach an image first.", true);
             threadPromptInput.requestFocus();
+            return;
+        }
+        if (isEditingQueuedTurn()) {
+            saveQueuedEdit(prompt, attachmentUri, attachmentName, attachmentMimeType, preservedImages, hasAttachment);
             return;
         }
         if (isSendingThreadTurn) {
@@ -3887,6 +3925,56 @@ public class MainActivity extends Activity {
                 mainHandler.post(() -> {
                     updateThreadComposerState();
                     setThreadTurnStatus(friendlyThreadError(error, "Could not queue message."), true);
+                });
+            }
+        });
+    }
+
+    private void saveQueuedEdit(
+            String prompt,
+            Uri attachmentUri,
+            String attachmentName,
+            String attachmentMimeType,
+            JSONArray preservedImages,
+            boolean hasAttachment
+    ) {
+        QueuedTurn original = queuedTurnById(editingQueuedTurnId);
+        if (original == null) {
+            cancelQueuedEdit();
+            setThreadTurnStatus("Queued edit was canceled because the item is no longer in the queue.", true);
+            return;
+        }
+
+        threadSendButton.setEnabled(false);
+        setThreadTurnStatus("Saving queued message edit...", false);
+        networkExecutor.execute(() -> {
+            try {
+                JSONObject payload = buildThreadTurnPayload(prompt, attachmentUri, attachmentName, attachmentMimeType, preservedImages);
+                mainHandler.post(() -> {
+                    if (!replaceQueuedTurnPayload(original.id, payload)) {
+                        setThreadTurnStatus("Could not save queued edit. The original message is unchanged.", true);
+                        updateThreadComposerState();
+                        return;
+                    }
+                    threadPromptInput.setText("");
+                    if (hasAttachment) {
+                        clearSelectedImageState();
+                    }
+                    editingQueuedImages = null;
+                    editingQueuedTurnId = "";
+                    updateAttachmentPreview();
+                    updateQueueEditUi();
+                    persistQueue();
+                    renderQueuedTurns();
+                    rerenderCurrentThreadMessages();
+                    updateThreadComposerState();
+                    setThreadTurnStatus("Queued message updated.", false);
+                    maybeRunQueuedTurn();
+                });
+            } catch (Exception error) {
+                mainHandler.post(() -> {
+                    updateThreadComposerState();
+                    setThreadTurnStatus(friendlyThreadError(error, "Could not save queued edit."), true);
                 });
             }
         });
@@ -4314,6 +4402,13 @@ public class MainActivity extends Activity {
         if (threadSendButton == null || threadPromptInput == null) {
             return;
         }
+        if (isEditingQueuedTurn()) {
+            threadSendButton.setEnabled(true);
+            threadSendButton.setText("Save");
+            threadPromptInput.setHint("Edit queued message");
+            updateQueueEditUi();
+            return;
+        }
         boolean queueMode = currentThreadActive || isSendingThreadTurn;
         threadSendButton.setEnabled(true);
         threadSendButton.setText(queueMode ? "Queue" : "Send");
@@ -4517,12 +4612,16 @@ public class MainActivity extends Activity {
     }
 
     private void editQueuedTurn(QueuedTurn turn) {
-        if (!queuedThreadTurns.remove(turn)) {
+        if (turn == null || !queuedThreadTurns.contains(turn)) {
             return;
         }
-        persistQueue();
+        if (samePayload(turn.payload, sendingThreadPayload)) {
+            setThreadTurnStatus("This queued message is already sending and cannot be edited.", true);
+            return;
+        }
+        editingQueuedTurnId = turn.id;
         if (turn.id.equals(lastRequestId)) {
-            updateRequestStatusPill("Editing", requestSummary(turn.payload), "Removed from queue for editing.", false, turn.id, true);
+            updateRequestStatusPill("Editing", requestSummary(turn.payload), "Editing in place. The original remains queued until you save.", false, turn.id, true);
         }
         threadPromptInput.setText(turn.payload.optString("prompt", ""));
         threadPromptInput.setSelection(threadPromptInput.length());
@@ -4531,16 +4630,77 @@ public class MainActivity extends Activity {
         selectedImageMimeType = "";
         editingQueuedImages = copyJsonArray(turn.payload.optJSONArray("images"));
         updateAttachmentPreview();
+        updateQueueEditUi();
         renderQueuedTurns();
         rerenderCurrentThreadMessages();
         updateThreadComposerState();
         setThreadTurnStatus(editingQueuedImages != null && editingQueuedImages.length() > 0
-                ? "Editing queued message. Attached image is preserved."
-                : "Editing queued message.", false);
+                ? "Editing queued message. Attached image is preserved. Save updates the queued item."
+                : "Editing queued message. Save updates the queued item.", false);
+    }
+
+    private boolean isEditingQueuedTurn() {
+        return editingQueuedTurnId != null && !editingQueuedTurnId.isEmpty();
+    }
+
+    private QueuedTurn queuedTurnById(String turnId) {
+        if (turnId == null || turnId.isEmpty()) {
+            return null;
+        }
+        for (QueuedTurn turn : queuedThreadTurns) {
+            if (turnId.equals(turn.id)) {
+                return turn;
+            }
+        }
+        return null;
+    }
+
+    private boolean replaceQueuedTurnPayload(String turnId, JSONObject payload) {
+        for (int index = 0; index < queuedThreadTurns.size(); index++) {
+            QueuedTurn turn = queuedThreadTurns.get(index);
+            if (turn.id.equals(turnId)) {
+                queuedThreadTurns.set(index, new QueuedTurn(payload, turn.id, turn.createdAt));
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void cancelQueuedEdit() {
+        editingQueuedTurnId = "";
+        editingQueuedImages = null;
+        clearSelectedImageState();
+        if (threadPromptInput != null) {
+            threadPromptInput.setText("");
+        }
+        updateQueueEditUi();
+        renderQueuedTurns();
+        rerenderCurrentThreadMessages();
+        updateThreadComposerState();
+        setThreadTurnStatus("Queued edit canceled. Original queued message is unchanged.", false);
+    }
+
+    private void updateQueueEditUi() {
+        if (queueEditLayout == null || queueEditStatusView == null) {
+            return;
+        }
+        boolean editing = isEditingQueuedTurn();
+        queueEditLayout.setVisibility(editing ? View.VISIBLE : View.GONE);
+        if (editing) {
+            QueuedTurn turn = queuedTurnById(editingQueuedTurnId);
+            String label = turn == null ? "Editing queued message" : "Editing queued message from " + timeFormat.format(new Date(turn.createdAt));
+            queueEditStatusView.setText(label);
+        }
     }
 
     private void deleteQueuedTurn(QueuedTurn turn) {
         if (queuedThreadTurns.remove(turn)) {
+            if (turn.id.equals(editingQueuedTurnId)) {
+                editingQueuedTurnId = "";
+                editingQueuedImages = null;
+                clearSelectedImageState();
+                updateQueueEditUi();
+            }
             persistQueue();
             renderQueuedTurns();
             rerenderCurrentThreadMessages();
@@ -4556,8 +4716,10 @@ public class MainActivity extends Activity {
 
     private void clearThreadQueue() {
         queuedThreadTurns.clear();
+        editingQueuedTurnId = "";
         editingQueuedImages = null;
         clearSelectedImageState();
+        updateQueueEditUi();
         persistQueue();
         renderQueuedTurns();
         rerenderCurrentThreadMessages();
@@ -4609,6 +4771,12 @@ public class MainActivity extends Activity {
         } catch (Exception error) {
             Log.w(TAG, "Could not load queue for thread " + threadId, error);
         }
+        if (isEditingQueuedTurn() && queuedTurnById(editingQueuedTurnId) == null) {
+            editingQueuedTurnId = "";
+            editingQueuedImages = null;
+            clearSelectedImageState();
+            updateQueueEditUi();
+        }
         renderQueuedTurns();
         maybeRunQueuedTurnSoon();
     }
@@ -4645,6 +4813,12 @@ public class MainActivity extends Activity {
         archiveSentQueuedTurn(threadId, turn, stage, detail);
         if (threadId.equals(queueThreadId)) {
             queuedThreadTurns.remove(turn);
+            if (turn.id.equals(editingQueuedTurnId)) {
+                editingQueuedTurnId = "";
+                editingQueuedImages = null;
+                clearSelectedImageState();
+                updateQueueEditUi();
+            }
             persistQueue();
             return;
         }
@@ -4678,7 +4852,9 @@ public class MainActivity extends Activity {
         queueThreadId = null;
         editingQueuedImages = null;
         sendingThreadPayload = null;
+        editingQueuedTurnId = "";
         clearSelectedImageState();
+        updateQueueEditUi();
         renderQueuedTurns();
         rerenderCurrentThreadMessages();
         updateThreadComposerState();
